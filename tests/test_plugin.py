@@ -1,4 +1,4 @@
-"""Exercise the hook with real curl and Git, a local API, and fake credentials."""
+"""Exercise the hook with the real agent/Git, a local API, and fake credentials."""
 
 import http.server
 import json
@@ -27,7 +27,7 @@ class PluginTest(unittest.TestCase):
         self.bin = self.directory / "bin"
         self.bin.mkdir()
         # Keep host Entire installations out of these tests.
-        for name in ("bash", "curl", "git", "jq", "mkdir", "cp", "dirname",
+        for name in ("bash", "buildkite-agent", "curl", "git", "sed", "mkdir", "cp", "dirname",
                      "uname", "mktemp", "sha256sum", "tar", "gzip", "rm"):
             (self.bin / name).symlink_to(shutil.which(name))
         self.env = {
@@ -37,7 +37,6 @@ class PluginTest(unittest.TestCase):
             "ENTIRE_TOKEN": "personal-token-must-be-replaced",
             "EXPECTED_TOKEN": TOKEN,
         }
-        self.script(self.bin / "entire", "#!/bin/sh\nexit 0\n")
         self.script(self.bin / "git-remote-entire", f"""#!/bin/sh
 [ "$ENTIRE_TOKEN" = "$EXPECTED_TOKEN" ] || exit 1
 while read -r line; do
@@ -59,7 +58,7 @@ done
                 owner.requests.append((self.path, self.headers["Authorization"], json.loads(body)))
                 status, body = owner.response
                 self.send_response(status)
-                self.send_header("Location", owner.env["BUILDKITE_AGENT_ENDPOINT"] + "/redirected")
+                self.send_header("Content-Type", "application/json")
                 self.end_headers()
                 self.wfile.write(body.encode())
 
@@ -79,10 +78,10 @@ done
     def hook(self, command='git ls-remote "$BUILDKITE_REPO"'):
         return subprocess.run([
             shutil.which("bash"), "-x", "-c", '''
-source "$1/hooks/pre-checkout"
+source "$1/hooks/environment"
 [[ "$BUILDKITE_REPO" == "$2" ]]
 eval "$3"
-''', "test", str(ROOT), URL,
+''', "test", str(ROOT), self.env["BUILDKITE_REPO"],
             command,
         ], env=self.env, cwd=self.directory, text=True, capture_output=True, timeout=240)
 
@@ -94,47 +93,57 @@ eval "$3"
                     self.assertNotIn(secret.encode(), path.read_bytes())
 
     def test_existing_install_and_standard_repo_use_job_credentials(self):
-        result = self.hook()
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.strip(), f"{REF}\trefs/heads/main")
-        self.assert_secret_free(result)
+        for url in (URL, URL + ".git"):
+            self.env["BUILDKITE_REPO"] = url
+            result = self.hook()
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), f"{REF}\trefs/heads/main")
+            self.assert_secret_free(result)
+        # This is a lookup alias, not the listed HTTPS clone URL ending in .git.
+        # Nor should a native URL's existing .git suffix be removed.
         self.assertEqual(self.requests, [
-            ("/v3/jobs/job-123/repository_access_token", f"Token {AGENT_TOKEN}", {"repo_url": URL})
+            ("/v3/jobs/job-123/repository_access_token", f"Token {AGENT_TOKEN}",
+             {"repo_url": "https://region.entire.io/et/project/repository"}),
+            ("/v3/jobs/job-123/repository_access_token", f"Token {AGENT_TOKEN}",
+             {"repo_url": "https://region.entire.io/et/project/repository.git"})
         ])
         self.assertFalse((self.home / ".local").exists())
 
     def test_install_is_left_in_place_and_reused(self):
-        for name in ("entire", "git-remote-entire"):
-            (self.bin / name).unlink()
+        (self.bin / "git-remote-entire").unlink()
         archive = os.environ.get("ENTIRE_TEST_ARCHIVE")
         curl = shutil.which("curl")
         (self.bin / "curl").unlink()
         self.env["TEST_ARCHIVE"] = str(Path(archive).resolve()) if archive else ""
         self.script(self.bin / "curl", f"""#!/bin/bash
 printf '%s\\n' "$@" >> "$HOME/curl-argv"
-if [[ "$*" == *entire_linux_amd64.tar.gz* && -n "$TEST_ARCHIVE" ]]; then
+if [[ -n "$TEST_ARCHIVE" ]]; then
   cp "$TEST_ARCHIVE" "${{@: -1}}"
   exit
 fi
 exec {curl} "$@"
 """)
-        command = 'entire version; test -x "$(command -v git-remote-entire)"; [[ "$ENTIRE_TOKEN" == "$EXPECTED_TOKEN" ]]'
+        command = 'git-remote-entire --version; [[ "$ENTIRE_TOKEN" == "$EXPECTED_TOKEN" ]]'
         result = self.hook(command)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("Installing Entire", result.stdout)
-        self.assertIn("Entire CLI 0.11.4", result.stdout)
+        self.assertIn("Installing git-remote-entire", result.stdout)
+        self.assertIn("git-remote-entire 0.0.0+57de2c3", result.stdout)
         self.assert_secret_free(result)
-        self.assertTrue((self.home / ".local/bin/git-remote-entire").is_file())
+        helper = self.home / ".local/bin/git-remote-entire"
+        installed = helper.stat()
+        self.assertFalse((self.home / ".local/bin/entire").exists())
         # A new hook process must discover the persisted installation.
         result = self.hook(command)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertNotIn("Installing Entire", result.stdout)
-        self.assertIn("Entire CLI 0.11.4", result.stdout)
+        self.assertNotIn("Installing git-remote-entire", result.stdout)
+        self.assertIn("git-remote-entire 0.0.0+57de2c3", result.stdout)
         self.assert_secret_free(result)
-        self.assertEqual((self.home / "curl-argv").read_text().count("entire_linux_amd64.tar.gz"), 1)
+        self.assertEqual(helper.stat().st_ino, installed.st_ino)
+        self.assertEqual(helper.stat().st_mtime_ns, installed.st_mtime_ns)
+        self.assertEqual((self.home / "curl-argv").read_text().count("git-remote-entire_linux_"), 1)
 
     def test_corrupt_download_does_not_install(self):
-        (self.bin / "entire").unlink()
+        (self.bin / "git-remote-entire").unlink()
         (self.bin / "curl").unlink()
         self.script(self.bin / "curl", '#!/bin/bash\nprintf corrupt > "${@: -1}"\n')
         result = self.hook()
@@ -143,10 +152,12 @@ exec {curl} "$@"
         self.assertFalse((self.home / ".local").exists())
         self.assertEqual(self.requests, [])
 
-    def test_api_errors_redirects_and_invalid_tokens_fail_without_leaking(self):
-        for status, body in [(401, TOKEN), (500, TOKEN), (307, json.dumps({"token": TOKEN})),
+    def test_credential_errors_and_invalid_tokens_fail_without_leaking(self):
+        for status, body in [(401, json.dumps({"message": TOKEN})),
+                             (403, json.dumps({"message": TOKEN})),
                              (200, "not-json " + TOKEN), (200, '{}'),
-                             (200, '{"token":""}'), (200, '{"token":null}')]:
+                             (200, '{"token":""}'), (200, '{"token":null}'),
+                             (200, '{"token":"fail"}')]:
             with self.subTest(status=status, body=body):
                 self.response = status, body
                 result = self.hook()
@@ -154,6 +165,58 @@ exec {curl} "$@"
                 self.assertNotIn(REF, result.stdout)
                 self.assert_secret_free(result)
         self.assertEqual(len(self.requests), 7)
+
+    def test_invalid_repo_cannot_inject_credential_fields(self):
+        for url in ("https://region.entire.io/et/p/r.git", "entire://region.entire.io",
+                    "entire://region.entire.io/et/p/r\nhost=other.entire.io"):
+            self.env["BUILDKITE_REPO"] = url
+            result = self.hook()
+            self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.requests, [])
+
+    def test_agent_runs_plugin_environment_before_checkout_without_git_credentials_config(self):
+        plugin = self.directory / "plugin"
+        shutil.copytree(ROOT / "hooks", plugin / "hooks")
+        subprocess.run(["git", "init", "-q", str(plugin)], env=self.env, check=True)
+        subprocess.run(["git", "-C", str(plugin), "add", "."], env=self.env, check=True)
+        subprocess.run(["git", "-C", str(plugin), "-c", "user.name=Test", "-c",
+                        "user.email=test@example.com", "-c", "commit.gpgsign=false",
+                        "commit", "-qm", "Test plugin"], env=self.env, check=True)
+        # Test-only source mapping: exercise normal external-plugin hook timing.
+        (self.home / ".gitconfig").write_text(
+            f'[url "file://{plugin}"]\n  insteadOf = https://github.com/sj26/entire-buildkite-plugin\n')
+        hooks = self.directory / "agent-hooks"
+        hooks.mkdir()
+        self.script(hooks / "pre-checkout", '''#!/bin/bash
+set -eu
+[[ "$ENTIRE_TOKEN" == "$EXPECTED_TOKEN" ]]
+if git config --get credential.helper; then exit 1; fi
+echo 'Token ready before pre-checkout'
+''')
+        self.script(hooks / "checkout", "#!/bin/sh\nexit 0\n")
+        checkout = self.directory / "checkout"
+        checkout.mkdir()
+        env = self.env | {
+            "PATH": f"{self.bin}:{os.environ['PATH']}",
+            "BUILDKITE_BUILD_CHECKOUT_PATH": str(checkout),
+            "BUILDKITE_BUILD_PATH": str(self.directory / "builds"),
+            "BUILDKITE_SOCKETS_PATH": str(self.directory / "sockets"),
+            "BUILDKITE_PLUGINS_PATH": str(self.directory / "plugins"),
+            "BUILDKITE_ORGANIZATION_SLUG": "test",
+            "BUILDKITE_PIPELINE_SLUG": "test",
+            "BUILDKITE_PIPELINE_PROVIDER": "custom",
+            "BUILDKITE_AGENT_NAME": "test", "BUILDKITE_COMMIT": REF,
+            "BUILDKITE_BRANCH": "main", "GIT_CONFIG_NOSYSTEM": "1",
+        }
+        result = subprocess.run([
+            "buildkite-agent", "bootstrap", "--no-job-api", "--plugins-enabled",
+            "--command-eval", "--plugins", '[{"github.com/sj26/entire-buildkite-plugin":{}}]',
+            "--hooks-path", str(hooks), "--command", 'git ls-remote "$BUILDKITE_REPO"',
+        ], env=env, cwd=checkout, text=True, capture_output=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Token ready before pre-checkout", result.stdout)
+        self.assertIn(f"{REF}\trefs/heads/main", result.stdout)
+        self.assert_secret_free(result)
 
 
 if __name__ == "__main__":

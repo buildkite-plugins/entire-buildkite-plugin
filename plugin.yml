@@ -1,11 +1,12 @@
 name: Entire
-description: Install Entire and authenticate the agent's checkout with job-issued credentials.
+description: Install the Entire Git remote helper and authenticate with Buildkite credentials.
 author: https://github.com/sj26
 requirements:
   - bash
+  - buildkite-agent
   - curl
   - git
-  - jq
+  - sed
   - sha256sum
   - tar
 configuration:

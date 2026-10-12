@@ -1,7 +1,7 @@
 # Entire Buildkite Plugin
 
-Install the [Entire CLI](https://github.com/entireio/cli) and authenticate the
-Buildkite agent's checkout with job-issued credentials.
+Install the native [Entire Git remote helper](https://github.com/entireio/cli)
+and authenticate checkout with Buildkite credentials.
 
 ```yaml
 plugins:
@@ -9,19 +9,31 @@ plugins:
 ```
 
 Uses the native `entire://` URL in `BUILDKITE_REPO` and the agent's normal
-checkout. No plugin configuration or Entire login is needed. The job must have
-access to Buildkite's repository-token endpoint for its Entire repository.
+checkout. Add the plugin explicitly; no plugin configuration or Entire login is
+needed.
 
-An existing CLI and native Git remote helper are reused. If either is missing,
-the plugin installs checksum-verified [Entire v0.11.4](https://github.com/entireio/cli/releases/tag/v0.11.4)
-into `~/.local/bin` on Linux x86_64. On other platforms, install Entire first.
-The installation is left in place for later jobs.
+The environment hook reuses an existing `git-remote-entire`. If missing, it
+downloads the same helper-only, commit-pinned S3 build as
+[Entire's plugin](https://github.com/entireio/entire-core-auth-buildkite-plugin/blob/cc7050e0c8b9d0feae2cbebddf220890252d1c5c/hooks/environment):
+[CLI commit 57de2c3](https://github.com/entireio/cli/commit/57de2c37992efdbcc0519bda2376ccf93f3020c2).
+The plugin verifies its checksum, installs into `~/.local/bin`, adds that
+directory to PATH, and leaves it installed. Automatic installation supports
+Linux amd64 and arm64; provision the helper yourself on other platforms. It does
+not install the full CLI or use Entire's OIDC exchange.
 
-Before checkout, the plugin requests a token for `BUILDKITE_REPO` and exports
-`ENTIRE_TOKEN` for the native helper. This token is also available to later job
-commands and the agent's hook environment snapshots. Entire does not use Git
-credential helpers. No remote wrapper, Git configuration, or CLI login is needed.
+The hook calls `buildkite-agent git-credentials-helper get` directly, before
+checkout, and exports its password as `ENTIRE_TOKEN`. It does not depend on Git
+credential configuration being installed. The agent helper requires HTTPS, so
+the lookup uses the native URL's exact host and path with only the scheme
+changed; `BUILDKITE_REPO` stays unchanged. This lookup alias is **not** the
+repository's HTTPS clone URL: no `.git` suffix is added.
 
-The token is installation-wide and expires after at most 45 minutes. It is
-requested once before checkout, not refreshed; later Git operations fail after
-it expires.
+End-to-end use requires the Entire issuer compatibility in
+[Buildkite PR #35448](https://github.com/buildkite/buildkite/pull/35448). The issuer
+must match that alias against the selected repository's current listing entry
+before issuing credentials. Picker changes alone do not provide authentication.
+
+`ENTIRE_TOKEN` is available to later job commands and the agent's hook environment
+snapshots. The token is installation-wide and expires after at most 45 minutes.
+It is requested once in the environment hook, not refreshed; later Git operations
+fail after it expires. No remote wrapper or CLI login is used.

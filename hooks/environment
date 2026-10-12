@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+set +x
+set -euo pipefail
+
+if [[ ! $BUILDKITE_REPO =~ ^entire://([^/[:space:]@?#]+)/([^[:space:]?#]+)$ ]]; then
+  echo 'Entire: BUILDKITE_REPO must be a native entire:// repository URL.' >&2
+  exit 1
+fi
+host="${BASH_REMATCH[1]}"
+path="${BASH_REMATCH[2]}"
+
+# Reuse an existing installation, including one left by an earlier job.
+export PATH="${PATH}:${HOME}/.local/bin"
+if ! command -v git-remote-entire >/dev/null; then
+  echo '--- :package: Installing git-remote-entire'
+  "$(dirname "${BASH_SOURCE[0]}")/../lib/install"
+  export PATH="${HOME}/.local/bin:${PATH}"
+fi
+
+# The agent helper accepts HTTPS only. The issuer matches this exact alias
+# against the selected repository's native URL; it is not a derived clone URL.
+# Invoke it directly: Git credential configuration need not exist yet.
+if ! credentials="$(printf 'protocol=https\nhost=%s\npath=%s\n\n' "$host" "$path" \
+  | buildkite-agent git-credentials-helper get 2>/dev/null)"; then
+  echo 'Entire: Buildkite credential lookup failed.' >&2
+  exit 1
+fi
+ENTIRE_TOKEN="$(printf '%s\n' "$credentials" | sed -n 's/^password=//p')"
+if [[ -z $ENTIRE_TOKEN || $ENTIRE_TOKEN == fail ]]; then
+  echo 'Entire: Buildkite credential lookup returned no token.' >&2
+  exit 1
+fi
+export ENTIRE_TOKEN
+unset credentials host path

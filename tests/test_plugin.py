@@ -1,5 +1,6 @@
-"""Exercise the installation hook and the real helper's native credential lookup."""
+"""Exercise installation and hosted environment-token handoff with real binaries."""
 
+import base64
 import hashlib
 import http.server
 import json
@@ -8,6 +9,7 @@ from pathlib import Path
 import platform
 import secrets
 import shutil
+import ssl
 import subprocess
 import tarfile
 import tempfile
@@ -18,7 +20,6 @@ ROOT = Path(__file__).resolve().parents[1]
 COMMIT = "a564a68c802d50a0f4cff333da6ee13d59be027d"
 VERSION = f"0.0.0+{COMMIT}"
 URL = "entire://region.entire.io/et/project/repository"
-TOKEN = "test-job-credential"
 
 
 class PluginTest(unittest.TestCase):
@@ -53,7 +54,7 @@ class PluginTest(unittest.TestCase):
         self.bin.mkdir()
         self.installed = self.home / ".local/bin/git-remote-entire"
         # Do not pick up a host helper, Git configuration, or credentials.
-        for name in ("bash", "git", "sort", "mkdir", "cp", "uname", "mktemp", "sed", "cat",
+        for name in ("bash", "git", "python3", "sort", "mkdir", "cp", "uname", "mktemp", "sed", "cat",
                      "sha256sum", "tar", "gzip", "rm", "mv"):
             (self.bin / name).symlink_to(shutil.which(name))
         (self.bin / "buildkite-agent").symlink_to(self.agent)
@@ -67,14 +68,15 @@ cp "$TEST_ARCHIVE" "${@: -1}"
 
     def credential_api(self):
         self.requests = []
-        self.response = {"token": TOKEN, "username": "x-access-token"}
+        self.response = {"token": secrets.token_hex(20), "username": "x-access-token"}
+        self.response_status = 200
         owner = self
 
         class Handler(http.server.BaseHTTPRequestHandler):
             def do_POST(self):
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 owner.requests.append((self.path, body))
-                self.send_response(200)
+                self.send_response(owner.response_status)
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
                 self.wfile.write(json.dumps(owner.response).encode())
@@ -94,9 +96,10 @@ cp "$TEST_ARCHIVE" "${@: -1}"
         path.write_text(source)
         path.chmod(0o755)
 
-    def hook(self, command="git-remote-entire --version"):
+    def hook(self, command="git-remote-entire --version", trace=False):
         return subprocess.run([
-            "bash", "-c", 'source "$1/hooks/environment"; eval "$2"', "test", str(ROOT), command,
+            "bash", *(["-x"] if trace else []), "-c",
+            'source "$1/hooks/environment"; eval "$2"', "test", str(ROOT), command,
         ], env=self.env, cwd=self.home, text=True, capture_output=True, timeout=30)
 
     def test_missing_helper_is_installed_and_reused_without_job_credentials(self):
@@ -156,137 +159,139 @@ cp "$TEST_ARCHIVE" "${@: -1}"
                 self.assertIn("automatic installation supports", result.stderr)
                 self.assertFalse((self.home / "downloads").exists())
 
-    def test_adapter_uses_agent_credentials_without_tokens_in_environment_or_files(self):
+    def test_hosted_token_is_exported_once_without_config_changes_or_leaks(self):
         self.credential_api()
-        # Existing job config and HTTPS helper must survive. For Entire, reset
-        # this helper or its password=fail response prevents our adapter running.
-        self.env.update(GIT_CONFIG_COUNT="2", GIT_CONFIG_KEY_0="credential.helper",
-                        GIT_CONFIG_VALUE_0="!buildkite-agent git-credentials-helper",
-                        GIT_CONFIG_KEY_1="credential.useHttpPath", GIT_CONFIG_VALUE_1="true",
-                        GIT_TRACE="1")
+        token = self.response["token"]
+        self.env.update(ENTIRE_TOKEN="old-operator-token", ENTIRE_GIT_NO_LOGIN_FALLBACK="false",
+                        GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="credential.helper",
+                        GIT_CONFIG_VALUE_0="!echo quit=true", GIT_TRACE="1")
+        before = subprocess.run(["git", "config", "--null", "--list"], env=self.env,
+                                cwd=self.home, capture_output=True, check=True)
         for suffix in ("", ".git"):
-            with self.subTest(suffix=suffix):
-                self.env["BUILDKITE_REPO"] = URL + suffix
-                for protocol in ("entire", "https"):
-                    self.env["TEST_PROTOCOL"] = protocol
+            for trace in (False, True):
+                with self.subTest(suffix=suffix, trace=trace):
+                    self.env["BUILDKITE_REPO"] = URL + suffix
                     result = self.hook('''
-[[ -z ${ENTIRE_TOKEN+x} ]]
-[[ $ENTIRE_GIT_NO_LOGIN_FALLBACK == true ]]
-credentials=$(printf 'protocol=%s\nhost=region.entire.io\npath=et/project/repository%s\n\n' "$TEST_PROTOCOL" "${BUILDKITE_REPO#''' + URL + '''}" | git credential fill)
-printf '%s' "$credentials" | sha256sum
-unset credentials
-export -p > "$HOME/after-hook"
-''')
-                    self.assertEqual(result.returncode, 0, result.stderr)
-                    expected = (f"protocol={protocol}\nhost=region.entire.io\n"
-                                f"path=et/project/repository{suffix}\nusername=x-access-token\npassword={TOKEN}")
-                    self.assertIn(hashlib.sha256(expected.encode()).hexdigest(), result.stdout)
-                    self.assertNotIn(TOKEN, result.stdout + result.stderr)
-                    self.assertNotIn(TOKEN, (self.home / "after-hook").read_text())
+python3 -c 'import hashlib, os; token = os.environ["ENTIRE_TOKEN"]; assert [k for k, v in os.environ.items() if token in v] == ["ENTIRE_TOKEN"]; print(hashlib.sha256(token.encode()).hexdigest())'
+[[ $ENTIRE_GIT_NO_LOGIN_FALLBACK == false ]]
+git config --null --list | sha256sum
+case $- in *x*) echo tracing=on ;; *) echo tracing=off ;; esac
+''', trace=trace)
+                    self.assertEqual(result.returncode, 0)
+                    self.assertIn(hashlib.sha256(token.encode()).hexdigest(), result.stdout)
+                    self.assertIn(hashlib.sha256(before.stdout).hexdigest(), result.stdout)
+                    self.assertIn(f"tracing={'on' if trace else 'off'}", result.stdout)
+                    self.assertFalse(token in result.stdout + result.stderr, "Token leaked to output")
                     self.assertEqual(self.requests[-1], ("/v3/jobs/job-123/repository_access_token",
                                                        {"repo_url": f"https://region.entire.io/et/project/repository{suffix}"}))
         self.assertEqual(len(self.requests), 4)
-        self.assertFalse((self.home / ".gitconfig").exists())
+        for path in self.home.rglob("*"):
+            if path.is_file() and not path.is_symlink():
+                self.assertFalse(token.encode() in path.read_bytes(), "Token persisted to a file")
 
-    def test_adapter_is_scoped_and_not_persisted_for_other_jobs(self):
+    def test_hosted_credential_errors_fail_without_leaking_or_using_operator_token(self):
         self.credential_api()
-        self.env.update(GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="credential.helper",
-                        GIT_CONFIG_VALUE_0="!echo username=unrelated; echo password=unrelated")
-        for path in ("et/project/other", "et/project/repository/child"):
-            result = self.hook(f"printf 'protocol=entire\\nhost=region.entire.io\\npath={path}\\n\\n' | git credential fill")
-            if path.endswith("/child"):
-                # Git URL scopes also match descendants; the adapter must reject
-                # those explicitly rather than forwarding a broader request.
-                self.assertNotEqual(result.returncode, 0)
-                self.assertNotIn("password=", result.stdout)
-                continue
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("password=unrelated", result.stdout)
-        self.assertEqual(self.requests, [])
-        result = subprocess.run(["git", "config", "--get-all", "credential.helper"],
-                                env=self.env, text=True, capture_output=True, check=True)
-        self.assertEqual(result.stdout.strip(), self.env["GIT_CONFIG_VALUE_0"])
+        secret = secrets.token_hex(20)
+        self.env["ENTIRE_TOKEN"] = secret
+        for status, token in ((200, ""), (200, " \t"), (403, secret)):
+            with self.subTest(status=status, empty=not token):
+                self.response_status = status
+                self.response = {"token": token, "message": secret}
+                result = self.hook('echo continued', trace=True)
+                self.assertEqual(result.returncode, 1)
+                self.assertNotIn("continued", result.stdout)
+                self.assertIn("Entire:", result.stderr)
+                self.assertFalse(secret in result.stdout + result.stderr, "Credential leaked to output")
+        self.assertEqual(len(self.requests), 3)
 
-    def test_adapter_passes_agent_errors_to_stderr(self):
+    def test_pinned_helper_uses_environment_bearer_and_server_repository_authorization(self):
         self.credential_api()
-        self.response = {"token": "", "message": TOKEN}
-        self.env.update(GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="credential.helper",
-                        GIT_CONFIG_VALUE_0="!echo username=wrong; echo password=wrong")
-        self.script(self.bin / "askpass", '#!/bin/bash\necho invoked > "$HOME/prompted"\necho wrong\n')
-        self.env.update(GIT_ASKPASS=str(self.bin / "askpass"), GIT_TERMINAL_PROMPT="1")
-        result = self.hook('printf "url=%s\\n\\n" "$BUILDKITE_REPO" | git credential fill')
-        self.assertEqual(result.returncode, 128)
-        self.assertNotIn("password=", result.stdout)
-        self.assertFalse((self.home / "prompted").exists())
-        diagnostic = "repository credential response contained an empty token"
-        self.assertIn(diagnostic, result.stderr)
-        self.assertNotIn(diagnostic, result.stdout)
-        self.assertNotIn(TOKEN, result.stdout + result.stderr)
+        cert, key = self.home / "cert.pem", self.home / "key.pem"
+        subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+                        "-keyout", str(key), "-out", str(cert), "-days", "1",
+                        "-subj", "/CN=127.0.0.1", "-addext", "subjectAltName=IP:127.0.0.1"],
+                       check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        git_requests = []
+        oid = b"1" * 40
+        lines = [b"# service=git-upload-pack\n", None,
+                 oid + b" HEAD\0symref=HEAD:refs/heads/main object-format=sha1\n",
+                 oid + b" refs/heads/main\n", None]
+        advertisement = b"".join(b"0000" if line is None else f"{len(line) + 4:04x}".encode() + line
+                                 for line in lines)
 
-    def test_non_hosted_jobs_preserve_operator_credentials_and_configuration(self):
-        password = secrets.token_hex(20)
-        scoped_key = "credential.entire://operator@region.entire.io/et/project/repository.helper"
-        self.env.update(GIT_CONFIG_COUNT="4", GIT_CONFIG_KEY_0="credential.username",
-                        GIT_CONFIG_VALUE_0="operator", GIT_CONFIG_KEY_1="credential.helper",
-                        GIT_CONFIG_VALUE_1=f"!printf 'password={password}\\n'",
-                        GIT_CONFIG_KEY_2=scoped_key, GIT_CONFIG_VALUE_2="",
-                        GIT_CONFIG_KEY_3=scoped_key)
-        expected = ("protocol=entire\nhost=region.entire.io\npath=et/project/repository\n"
-                    f"username=operator\npassword={password}\n")
-        for compute, fallback in (("self-hosted", "false"), (None, None), ("unknown", "true")):
-            for key, value in (("BUILDKITE_COMPUTE_TYPE", compute), ("ENTIRE_GIT_NO_LOGIN_FALLBACK", fallback)):
-                self.env.pop(key, None)
-                if value is not None:
-                    self.env[key] = value
-            for name, helper in (("refusal", "!echo quit=true"),
-                                 ("alternate", "!echo username=alternate; echo password=wrong")):
-                with self.subTest(compute=compute, helper=name):
-                    self.env["GIT_CONFIG_VALUE_3"] = helper
-                    before = subprocess.run(["git", "config", "--null", "--list"],
-                                            env=self.env, cwd=self.home, capture_output=True, check=True)
-                    result = self.hook('''
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.path == "/.well-known/entire-cluster.json":
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(json.dumps({"core_urls": [origin]}).encode())
+                    return
+                git_requests.append((self.path, self.headers.get("Authorization")))
+                allowed = (self.path == "/et/project/repository/info/refs?service=git-upload-pack"
+                           and self.headers.get("Authorization") == f"Bearer {token}")
+                self.send_response(200 if allowed else 403)
+                self.send_header("Content-Type", "application/x-git-upload-pack-advertisement")
+                self.end_headers()
+                self.wfile.write(advertisement if allowed else b"denied")
+
+            def log_message(self, *_):
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(cert, key)
+        server.socket = context.wrap_socket(server.socket, server_side=True)
+        origin = f"https://127.0.0.1:{server.server_port}"
+        # Synthetic JWT: the client reads aud; this fixture checks the bearer,
+        # not its signature. Live Entire owns token signature/scope validation.
+        token = ".".join(base64.urlsafe_b64encode(json.dumps(value).encode()).rstrip(b"=").decode()
+                         for value in ({"alg": "HS256"}, {"aud": origin})) + ".c2lnbmF0dXJl"
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        self.response["token"] = token
+        self.env.update(BUILDKITE_REPO=origin.replace("https://", "entire://") + "/et/project/repository",
+                        SSL_CERT_FILE=str(cert), GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="credential.helper",
+                        GIT_CONFIG_VALUE_0='!echo used > "$HOME/git-used"; echo quit=true')
+        result = self.hook('''
+git -c protocol.version=0 ls-remote "$BUILDKITE_REPO"
+if git -c protocol.version=0 ls-remote "${BUILDKITE_REPO%/*}/other"; then exit 1; fi
+''')
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("1" * 40 + "\trefs/heads/main", result.stdout)
+        self.assertFalse((self.home / "git-used").exists())
+        self.assertFalse(token in result.stdout + result.stderr, "Bearer leaked to output")
+        self.assertEqual(self.requests, [("/v3/jobs/job-123/repository_access_token",
+                                         {"repo_url": origin + "/et/project/repository"})])
+        self.assertTrue(any("/repository/info/refs" in path for path, _ in git_requests))
+        self.assertTrue(any("/other/info/refs" in path for path, _ in git_requests))
+        self.assertTrue(all(auth == f"Bearer {token}" for _, auth in git_requests), "Wrong bearer")
+
+    def test_non_hosted_jobs_preserve_operator_auth_and_fallback_policy(self):
+        self.env.update(GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="credential.helper",
+                        GIT_CONFIG_VALUE_0="!echo quit=true")
+        before = subprocess.run(["git", "config", "--null", "--list"], env=self.env,
+                                cwd=self.home, capture_output=True, check=True)
+        for compute, token, fallback in (("self-hosted", secrets.token_hex(20), "false"),
+                                          (None, None, None), ("unknown", "", "true")):
+            with self.subTest(compute=compute):
+                for name, value in (("BUILDKITE_COMPUTE_TYPE", compute), ("ENTIRE_TOKEN", token),
+                                    ("ENTIRE_GIT_NO_LOGIN_FALLBACK", fallback)):
+                    self.env.pop(name, None)
+                    if value is not None:
+                        self.env[name] = value
+                result = self.hook('''
 git-remote-entire --version
+python3 -c 'import hashlib, os; token = os.environ.get("ENTIRE_TOKEN"); print("unset" if token is None else hashlib.sha256(token.encode()).hexdigest())'
 printf 'fallback=%s\\n' "${ENTIRE_GIT_NO_LOGIN_FALLBACK-unset}"
 git config --null --list | sha256sum
-printf 'url=%s\\n\\n' "$BUILDKITE_REPO" | git credential fill | sha256sum
 ''')
-                    self.assertEqual(result.returncode, 0)
-                    self.assertIn(VERSION, result.stdout)
-                    self.assertIn(f"fallback={fallback if fallback is not None else 'unset'}\n", result.stdout)
-                    self.assertIn(hashlib.sha256(before.stdout).hexdigest(), result.stdout)
-                    self.assertIn(hashlib.sha256(expected.encode()).hexdigest(), result.stdout)
-
-    def test_hosted_failure_diagnostics_do_not_capture_configured_helper_secrets(self):
-        self.credential_api()
-        self.response = {"token": "", "message": TOKEN}
-        self.assertEqual(self.hook().returncode, 0)
-        active_secret, unrelated_secret = secrets.token_hex(20), secrets.token_hex(20)
-        self.env.update(GIT_CONFIG_COUNT="2", GIT_CONFIG_KEY_0="credential.helper",
-                        GIT_CONFIG_VALUE_0=f"!printf 'password={active_secret}\\n'",
-                        GIT_CONFIG_KEY_1="credential.entire://unrelated.example/private.helper",
-                        GIT_CONFIG_VALUE_1=f"!printf 'username=other\\npassword={unrelated_secret}\\n'")
-        for path in ("et/project/repository", "et/project/repository/child"):
-            for trace in ("0", "1"):
-                with self.subTest(path=path, trace=trace):
-                    self.env["GIT_TRACE"] = trace
-                    result = self.hook(f"printf 'protocol=entire\\nhost=region.entire.io\\npath={path}\\n\\n' | git credential fill")
-                    self.assertEqual(result.returncode, 128)
-                    self.assertTrue(result.stdout == "", "No credentials on failure")
-                    # Do not print captured diagnostics or synthetic secrets if
-                    # a regression fails this assertion.
-                    self.assertFalse(active_secret in result.stderr, "Active configured secret leaked")
-                    self.assertFalse(unrelated_secret in result.stderr, "Unrelated configured secret leaked")
-        self.assertEqual(len(self.requests), 2)
-
-    def test_installed_helper_uses_adapter_and_fails_closed_without_leaking_errors(self):
-        self.credential_api()
-        self.response = {"token": "", "message": TOKEN}
-        result = self.hook('git ls-remote "$BUILDKITE_REPO"')
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("git credential lookup failed", result.stderr)
-        self.assertNotIn(TOKEN, result.stdout + result.stderr)
-        self.assertEqual(self.requests, [("/v3/jobs/job-123/repository_access_token",
-                                         {"repo_url": "https://region.entire.io/et/project/repository"})])
+                self.assertEqual(result.returncode, 0)
+                self.assertIn(VERSION, result.stdout)
+                self.assertIn("unset" if token is None else hashlib.sha256(token.encode()).hexdigest(), result.stdout)
+                self.assertIn(f"fallback={fallback if fallback is not None else 'unset'}\n", result.stdout)
+                self.assertIn(hashlib.sha256(before.stdout).hexdigest(), result.stdout)
 
     def test_invalid_repository_cannot_broaden_credential_scope(self):
         for url in ("", "https://region.entire.io/et/p/r", "entire://*.entire.io/et/p/r",

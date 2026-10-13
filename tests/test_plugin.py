@@ -203,6 +203,16 @@ export -p > "$HOME/after-hook"
                                 env=self.env, text=True, capture_output=True, check=True)
         self.assertEqual(result.stdout.strip(), self.env["GIT_CONFIG_VALUE_0"])
 
+    def test_adapter_passes_agent_errors_to_stderr(self):
+        self.credential_api()
+        self.response = {"token": "", "message": TOKEN}
+        result = self.hook('printf "url=%s\\n\\n" "$BUILDKITE_REPO" | git credential fill')
+        self.assertNotEqual(result.returncode, 0)
+        diagnostic = "repository credential response contained an empty token"
+        self.assertIn(diagnostic, result.stderr)
+        self.assertNotIn(diagnostic, result.stdout)
+        self.assertNotIn(TOKEN, result.stdout + result.stderr)
+
     def test_installed_helper_uses_adapter_and_fails_closed_without_leaking_errors(self):
         self.credential_api()
         self.response = {"token": "", "message": TOKEN}

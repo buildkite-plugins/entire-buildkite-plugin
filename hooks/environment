@@ -68,7 +68,7 @@ adapter='!f() {
     printf "quit=true\n"
     return
   fi
-  if credentials=$(printf "%s\n\n" "$request" | sed "s/^protocol=entire$/protocol=https/" | buildkite-agent git-credentials-helper "$@" 2>/dev/null); then
+  if credentials=$(printf "%s\n\n" "$request" | sed "s/^protocol=entire$/protocol=https/" | buildkite-agent git-credentials-helper "$@"); then
     printf "%s\n" "$credentials"
   else
     printf "quit=true\n"

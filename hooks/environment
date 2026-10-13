@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ ! ${BUILDKITE_REPO:-} =~ ^entire://[a-zA-Z0-9.-]+(:[0-9]+)?/[^[:space:]?#]+$ ]]; then
+  echo 'Entire: BUILDKITE_REPO must be a native entire:// repository URL.' >&2
+  exit 1
+fi
+
+# First upstream build with native Git credential lookup; no stable release yet.
+commit=a564a68c802d50a0f4cff333da6ee13d59be027d
+export PATH="${HOME}/.local/bin:${PATH}"
+export ENTIRE_GIT_NO_LOGIN_FALLBACK=true
+
+helper_is_current() {
+  local version
+  version="$(git-remote-entire --version 2>/dev/null)" || return 1
+  version="${version%%$'\n'*}"
+  case "$version" in
+    "git-remote-entire 0.0.0+$commit"|"git-remote-entire 0.11.5-nightly.202610120640.a564a68c8") return 0 ;;
+  esac
+  # Unknown development builds cannot be ordered by commit hash.
+  [[ $version =~ ^git-remote-entire\ ([0-9]+\.[0-9]+\.[0-9]+)(\+[^[:space:]]+)?$ ]] &&
+    printf '%s\n' 0.11.5 "${BASH_REMATCH[1]}" | sort -V -C
+}
+
+if ! helper_is_current; then
+  (
+    if [[ $(uname -s) != Linux ]]; then
+      echo 'Entire: automatic installation supports Linux only; provision a supported git-remote-entire on PATH.' >&2
+      exit 1
+    fi
+    case "$(uname -m)" in
+      x86_64|amd64)
+        arch=amd64
+        checksum=8ff942546a8abbb470cd0bbf7d86173f989cfcee66fc688747bccd662e5e0c75 ;;
+      aarch64|arm64)
+        arch=arm64
+        checksum=38686012904a479e30d008a17f5b4023b312207dbccb359d9fb7b33c00d0f277 ;;
+      *) echo 'Entire: automatic installation supports amd64 and arm64 only.' >&2; exit 1 ;;
+    esac
+
+    echo '--- :package: Installing git-remote-entire'
+    mkdir -p "$HOME/.local/bin"
+    directory="$(mktemp -d "$HOME/.local/bin/.entire.XXXXXXXX")"
+    trap 'rm -rf -- "$directory"' EXIT
+    curl -q --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+      --connect-timeout 15 --max-time 180 --retry 2 \
+      "https://entire-public-release-bucket-7f3e2a01c9b48d56.s3.us-east-2.amazonaws.com/commit/${commit}/git-remote-entire_linux_${arch}.tar.gz" \
+      --output "$directory/helper.tar.gz"
+    printf '%s  %s\n' "$checksum" "$directory/helper.tar.gz" \
+      | sha256sum --check --status || { echo 'Entire: release checksum mismatch.' >&2; exit 1; }
+    tar -xzf "$directory/helper.tar.gz" -C "$directory" git-remote-entire
+    # Same-filesystem rename preserves a working helper if installation fails.
+    mv -f "$directory/git-remote-entire" "$HOME/.local/bin/git-remote-entire"
+  )
+fi
+
+# Older agents accept HTTPS credentials only. Translate the credential request,
+# not the checkout URL. The issuer verifies this alias against the selected repo.
+# shellcheck disable=SC2016
+adapter='!f() {
+  set +x
+  [ "$1" = get ] || return 0
+  request=$(cat)
+  host=$(printf "%s\n" "$request" | sed -n "s/^host=//p")
+  path=$(printf "%s\n" "$request" | sed -n "s/^path=//p")
+  if [ "entire://$host/$path" != "$BUILDKITE_REPO" ]; then
+    printf "quit=true\n"
+    return
+  fi
+  if credentials=$(printf "%s\n\n" "$request" | sed "s/^protocol=entire$/protocol=https/" | buildkite-agent git-credentials-helper "$@" 2>/dev/null); then
+    printf "%s\n" "$credentials"
+  else
+    printf "quit=true\n"
+  fi
+}; f'
+
+# Job-local config overrides inherited helpers only for this repository. Preserve
+# existing environment config, and reset the helper list before adding ours.
+[[ ${GIT_CONFIG_COUNT:-0} =~ ^[0-9]+$ ]] || { echo 'Entire: invalid GIT_CONFIG_COUNT.' >&2; exit 1; }
+export GIT_CONFIG_COUNT=$((10#${GIT_CONFIG_COUNT:-0}))
+for helper in '' "$adapter"; do
+  export "GIT_CONFIG_KEY_${GIT_CONFIG_COUNT}=credential.${BUILDKITE_REPO}.helper"
+  export "GIT_CONFIG_VALUE_${GIT_CONFIG_COUNT}=$helper"
+  GIT_CONFIG_COUNT=$((GIT_CONFIG_COUNT + 1))
+done

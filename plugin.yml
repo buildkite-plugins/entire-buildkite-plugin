@@ -1,0 +1,15 @@
+name: Entire
+description: Install the Entire Git remote helper for repository checkout.
+author: https://github.com/buildkite
+requirements:
+  - bash
+  - buildkite-agent
+  - curl
+  - git
+  - sed
+  - sha256sum
+  - sort
+  - tar
+configuration:
+  additionalProperties: false
+  properties: {}

@@ -100,6 +100,7 @@ cp "$TEST_ARCHIVE" "${@: -1}"
     def test_missing_helper_is_installed_and_reused_without_job_credentials(self):
         result = self.hook('[[ -z ${ENTIRE_TOKEN+x} ]]; git-remote-entire --version')
         self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("~~~ :package: Installing git-remote-entire", result.stdout.splitlines())
         self.assertIn(VERSION, result.stdout)
         self.assertEqual(list(self.installed.parent.iterdir()), [self.installed])
         installed = self.installed.stat()

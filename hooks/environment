@@ -39,7 +39,7 @@ if ! helper_is_current; then
       *) echo 'Entire: automatic installation supports amd64 and arm64 only.' >&2; exit 1 ;;
     esac
 
-    echo '--- :package: Installing git-remote-entire'
+    echo '~~~ :package: Installing git-remote-entire'
     mkdir -p "$HOME/.local/bin"
     directory="$(mktemp -d "$HOME/.local/bin/.entire.XXXXXXXX")"
     trap 'rm -rf -- "$directory"' EXIT

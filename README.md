@@ -5,7 +5,8 @@ Check out [Entire](https://entire.io) repositories with Buildkite.
 ```yaml
 steps:
   - command: ./test.sh
-    plugins: [entire]
+    plugins:
+    - entire
 ```
 
 Installs or upgrades the Git remote helper when needed and reuses it across jobs.

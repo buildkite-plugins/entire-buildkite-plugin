@@ -6,6 +6,13 @@
 - Run `shellcheck hooks/*` and `python3 -B -m unittest discover -s tests -v`.
   Tests download pinned Entire and Agent binaries and use OpenSSL for a local
   TLS fixture; no live credentials are used.
+- Run `docker run --rm -v "$PWD:/plugin:ro" buildkite/plugin-linter --id entire`.
+  Fetch tags first; the linter uses local tags to check README release refs.
+  Keep the unversioned development example and an explicit `entire#main: {}`
+  example while unreleased, so the linter can validate the configuration.
+  On the first release, replace the branch example with the actual release tag
+  and update the unreleased notice. Update tagged examples on later releases.
+  Do not bypass example or version validation with skip flags.
 - Only `BUILDKITE_COMPUTE_TYPE=hosted` acquires the selected-repository token,
   once, and exports it as `ENTIRE_TOKEN`. Do not configure Git credentials or
   change operator authentication on other compute types. Never log or write the

@@ -6,10 +6,16 @@ requirements:
   - buildkite-agent
   - curl
   - git
+  - gzip
+  - mkdir
+  - mktemp
+  - mv
+  - rm
   - sed
   - sha256sum
   - sort
   - tar
+  - uname
 configuration:
   additionalProperties: false
   properties: {}

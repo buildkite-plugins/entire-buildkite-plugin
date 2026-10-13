@@ -2,13 +2,21 @@
 
 Check out [Entire](https://entire.io) repositories with Buildkite.
 
-Set your pipeline's repository to its `entire://` URL and add the plugin:
+This plugin is unreleased. During development, set your pipeline's repository to
+its `entire://` URL and add the unversioned plugin:
 
 ```yaml
 steps:
   - command: ./test.sh
     plugins:
     - entire
+```
+
+To name the development branch explicitly, replace the `plugins` list with:
+
+```yaml
+plugins:
+  - entire#main: {}
 ```
 
 Installs or upgrades the Git remote helper when needed and reuses it across jobs.
@@ -30,7 +38,7 @@ Do not print `ENTIRE_TOKEN` or dump the job's environment. Hosted credentials ar
 not refreshed and can expire during long jobs.
 
 Automatic installation supports Linux amd64 and arm64, with Bash, curl, Git,
-GNU coreutils, sed, and tar.
+GNU coreutils, gzip, sed, and tar.
 
 ## License
 

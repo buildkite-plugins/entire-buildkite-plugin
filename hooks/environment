@@ -9,7 +9,6 @@ fi
 # First upstream build with native Git credential lookup; no stable release yet.
 commit=a564a68c802d50a0f4cff333da6ee13d59be027d
 export PATH="${HOME}/.local/bin:${PATH}"
-export ENTIRE_GIT_NO_LOGIN_FALLBACK=true
 
 helper_is_current() {
   local version
@@ -55,58 +54,15 @@ if ! helper_is_current; then
   )
 fi
 
-[[ ${GIT_CONFIG_COUNT:-0} =~ ^[0-9]+$ ]] || { echo 'Entire: invalid GIT_CONFIG_COUNT.' >&2; exit 1; }
-export GIT_CONFIG_COUNT=$((10#${GIT_CONFIG_COUNT:-0}))
+# Only hosted jobs use Buildkite-issued Entire credentials. Leave operator
+# credential configuration and saved-login policy untouched everywhere else.
+if [[ ${BUILDKITE_COMPUTE_TYPE:-} == hosted ]]; then
+  export ENTIRE_GIT_NO_LOGIN_FALLBACK=true
 
-# Quote one argument for Git's POSIX helper shell, not Bash's $'...' syntax.
-quote_helper_arg() {
-  printf "'%s'" "${1//\'/\'\\\'\'}"
-}
-
-# Recognize the agent's generated command, including its resolved executable
-# path, without treating arbitrary operator helpers as HTTPS-only agents.
-agent_path=$(command -v buildkite-agent || :)
-agent_real_path=$(readlink -f "$agent_path" 2>/dev/null || printf '%s' "$agent_path")
-agent_helpers=(
-  '!buildkite-agent git-credentials-helper'
-  "!$(quote_helper_arg "$agent_path") git-credentials-helper"
-  "!$(quote_helper_arg "$agent_real_path") git-credentials-helper"
-)
-
-# Snapshot helper rules before installing the filter. --get-urlmatch loses
-# multiple values; replay the ordered rules and let credential fill select them
-# against the original entire:// context, including URL scopes and empty resets.
-# NUL records preserve multiline commands. No helpers run during discovery.
-upstream=$(git config --null --list | while IFS= read -r -d '' entry; do
-  key=${entry%%$'\n'*}
-  [[ $key =~ ^credential(\..*)?\.helper$ ]] || continue
-  helper=${entry#*$'\n'}
-  for agent_helper in "${agent_helpers[@]}"; do
-    if [[ $helper == "$agent_helper" ]]; then
-      # Older agents accept HTTPS only. Keep this translation at the agent
-      # boundary, and discard their failure sentinel rather than falling back.
-      # shellcheck disable=SC2016
-      helper='!f() {
-  set +x
-  if credentials=$(sed "s/^protocol=entire$/protocol=https/" | '"${helper#!}"' "$@"); then
-    printf "%s\n" "$credentials"
-  else
-    printf "quit=true\n"
-  fi
-}; f'
-      break
-    fi
-  done
-  printf ' -c '
-  if [[ $entry == *$'\n'* ]]; then
-    quote_helper_arg "$key=$helper"
-  else
-    quote_helper_arg "$key"
-  fi
-done)
-
-# shellcheck disable=SC2016
-adapter='!f() {
+  # Older agents accept HTTPS credentials only. Translate the credential request,
+  # not the checkout URL. The issuer verifies this alias against the selected repo.
+  # shellcheck disable=SC2016
+  adapter='!f() {
   set +x
   [ "$1" = get ] || return 0
   request=$(cat)
@@ -116,19 +72,20 @@ adapter='!f() {
     printf "quit=true\n"
     return
   fi
-  if credentials=$(printf "%s\n\n" "$request" | git -c credential.helper= '"$upstream"' -c credential.helper="!echo quit=true" credential fill); then
-    printf "%s\n" "$credentials" | sed -n "/^username=/p; /^password=/p; /^password_expiry_utc=/p"
+  if credentials=$(printf "%s\n\n" "$request" | sed "s/^protocol=entire$/protocol=https/" | buildkite-agent git-credentials-helper "$@"); then
+    printf "%s\n" "$credentials"
   else
     printf "quit=true\n"
   fi
 }; f'
 
-# Job-local config overrides inherited helpers only for this repository. Preserve
-# existing environment config, and reset the helper list before adding ours.
-# The nested fill resets again before replaying the snapshot, avoiding recursion;
-# its final quit helper forbids prompts or fallback if the chain is exhausted.
-for helper in '' "$adapter"; do
-  export "GIT_CONFIG_KEY_${GIT_CONFIG_COUNT}=credential.${BUILDKITE_REPO}.helper"
-  export "GIT_CONFIG_VALUE_${GIT_CONFIG_COUNT}=$helper"
-  GIT_CONFIG_COUNT=$((GIT_CONFIG_COUNT + 1))
-done
+  # Job-local config overrides inherited helpers only for this repository. Preserve
+  # existing environment config, and reset the helper list before adding ours.
+  [[ ${GIT_CONFIG_COUNT:-0} =~ ^[0-9]+$ ]] || { echo 'Entire: invalid GIT_CONFIG_COUNT.' >&2; exit 1; }
+  export GIT_CONFIG_COUNT=$((10#${GIT_CONFIG_COUNT:-0}))
+  for helper in '' "$adapter"; do
+    export "GIT_CONFIG_KEY_${GIT_CONFIG_COUNT}=credential.${BUILDKITE_REPO}.helper"
+    export "GIT_CONFIG_VALUE_${GIT_CONFIG_COUNT}=$helper"
+    GIT_CONFIG_COUNT=$((GIT_CONFIG_COUNT + 1))
+  done
+fi

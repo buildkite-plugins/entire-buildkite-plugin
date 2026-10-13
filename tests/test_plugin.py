@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import secrets
 import shutil
 import subprocess
 import tarfile
@@ -53,7 +54,7 @@ class PluginTest(unittest.TestCase):
         self.installed = self.home / ".local/bin/git-remote-entire"
         # Do not pick up a host helper, Git configuration, or credentials.
         for name in ("bash", "git", "sort", "mkdir", "cp", "uname", "mktemp", "sed", "cat",
-                     "sha256sum", "tar", "gzip", "rm", "mv", "readlink"):
+                     "sha256sum", "tar", "gzip", "rm", "mv"):
             (self.bin / name).symlink_to(shutil.which(name))
         (self.bin / "buildkite-agent").symlink_to(self.agent)
         self.env = {"HOME": str(self.home), "PATH": str(self.bin),
@@ -86,7 +87,8 @@ cp "$TEST_ARCHIVE" "${@: -1}"
         self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)
         self.env.update(BUILDKITE_AGENT_ENDPOINT=f"http://127.0.0.1:{server.server_port}/v3",
-                        BUILDKITE_AGENT_ACCESS_TOKEN="test-agent-session", BUILDKITE_JOB_ID="job-123")
+                        BUILDKITE_AGENT_ACCESS_TOKEN="test-agent-session", BUILDKITE_JOB_ID="job-123",
+                        BUILDKITE_COMPUTE_TYPE="hosted")
 
     def script(self, path, source):
         path.write_text(source)
@@ -169,6 +171,7 @@ cp "$TEST_ARCHIVE" "${@: -1}"
                     self.env["TEST_PROTOCOL"] = protocol
                     result = self.hook('''
 [[ -z ${ENTIRE_TOKEN+x} ]]
+[[ $ENTIRE_GIT_NO_LOGIN_FALLBACK == true ]]
 credentials=$(printf 'protocol=%s\nhost=region.entire.io\npath=et/project/repository%s\n\n' "$TEST_PROTOCOL" "${BUILDKITE_REPO#''' + URL + '''}" | git credential fill)
 printf '%s' "$credentials" | sha256sum
 unset credentials
@@ -207,102 +210,77 @@ export -p > "$HOME/after-hook"
     def test_adapter_passes_agent_errors_to_stderr(self):
         self.credential_api()
         self.response = {"token": "", "message": TOKEN}
-        self.env.update(GIT_CONFIG_COUNT="2", GIT_CONFIG_KEY_0="credential.helper",
-                        GIT_CONFIG_VALUE_0="!buildkite-agent git-credentials-helper",
-                        GIT_CONFIG_KEY_1="credential.helper",
-                        GIT_CONFIG_VALUE_1="!echo username=wrong; echo password=wrong")
+        self.env.update(GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="credential.helper",
+                        GIT_CONFIG_VALUE_0="!echo username=wrong; echo password=wrong")
+        self.script(self.bin / "askpass", '#!/bin/bash\necho invoked > "$HOME/prompted"\necho wrong\n')
+        self.env.update(GIT_ASKPASS=str(self.bin / "askpass"), GIT_TERMINAL_PROMPT="1")
         result = self.hook('printf "url=%s\\n\\n" "$BUILDKITE_REPO" | git credential fill')
-        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.returncode, 128)
+        self.assertNotIn("password=", result.stdout)
+        self.assertFalse((self.home / "prompted").exists())
         diagnostic = "repository credential response contained an empty token"
         self.assertIn(diagnostic, result.stderr)
         self.assertNotIn(diagnostic, result.stdout)
         self.assertNotIn(TOKEN, result.stdout + result.stderr)
 
-    def test_native_operator_chain_preserves_protocol_order_and_resets(self):
-        self.script(self.bin / "git-credential-operator", '''#!/bin/bash
-[[ $1 == "space ' quote" && $2 == get ]] || exit 1
-request=$(cat)
-[[ $request == *protocol=entire* ]] || exit 1
-[[ $request == *username=operator* ]] || exit 1
-printf 'password=operator-secret\n'
+    def test_non_hosted_jobs_preserve_operator_credentials_and_configuration(self):
+        password = secrets.token_hex(20)
+        scoped_key = "credential.entire://operator@region.entire.io/et/project/repository.helper"
+        self.env.update(GIT_CONFIG_COUNT="4", GIT_CONFIG_KEY_0="credential.username",
+                        GIT_CONFIG_VALUE_0="operator", GIT_CONFIG_KEY_1="credential.helper",
+                        GIT_CONFIG_VALUE_1=f"!printf 'password={password}\\n'",
+                        GIT_CONFIG_KEY_2=scoped_key, GIT_CONFIG_VALUE_2="",
+                        GIT_CONFIG_KEY_3=scoped_key)
+        expected = ("protocol=entire\nhost=region.entire.io\npath=et/project/repository\n"
+                    f"username=operator\npassword={password}\n")
+        for compute, fallback in (("self-hosted", "false"), (None, None), ("unknown", "true")):
+            for key, value in (("BUILDKITE_COMPUTE_TYPE", compute), ("ENTIRE_GIT_NO_LOGIN_FALLBACK", fallback)):
+                self.env.pop(key, None)
+                if value is not None:
+                    self.env[key] = value
+            for name, helper in (("refusal", "!echo quit=true"),
+                                 ("alternate", "!echo username=alternate; echo password=wrong")):
+                with self.subTest(compute=compute, helper=name):
+                    self.env["GIT_CONFIG_VALUE_3"] = helper
+                    before = subprocess.run(["git", "config", "--null", "--list"],
+                                            env=self.env, cwd=self.home, capture_output=True, check=True)
+                    result = self.hook('''
+git-remote-entire --version
+printf 'fallback=%s\\n' "${ENTIRE_GIT_NO_LOGIN_FALLBACK-unset}"
+git config --null --list | sha256sum
+printf 'url=%s\\n\\n' "$BUILDKITE_REPO" | git credential fill | sha256sum
 ''')
-        config = self.home / ".gitconfig"
-        config.write_text('''[credential]
-    helper = !echo username=wrong; echo password=wrong
-[credential "entire://region.entire.io/et/project"]
-    helper =
-    helper = !exit 1
-    helper = !echo username=operator
-[credential "https://region.entire.io/et/project/repository"]
-    helper = !echo quit=true
-''')
-        self.env.update(GIT_CONFIG_COUNT="2", GIT_CONFIG_KEY_0=f"credential.{URL}.helper",
-                        GIT_CONFIG_KEY_1="credential.helper", GIT_CONFIG_VALUE_1="!echo quit=true")
-        for helper in ('operator "space \' quote"',
-                       f'{self.bin}/git-credential-operator "space \' quote"',
-                       '!f() {\ngit credential-operator "space \' quote" "$@"\n}; f'):
-            with self.subTest(helper=helper):
-                self.env["GIT_CONFIG_VALUE_0"] = helper
-                before = subprocess.run(["git", "credential", "fill"], input=f"url={URL}\n\n",
-                                        env=self.env, cwd=self.home, text=True, capture_output=True)
-                self.assertEqual(before.returncode, 0, before.stderr)
-                self.assertIn("password=operator-secret", before.stdout)
-                result = self.hook('printf "url=%s\\n\\n" "$BUILDKITE_REPO" | git credential fill')
-                self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertIn(before.stdout, result.stdout)
+                    self.assertEqual(result.returncode, 0)
+                    self.assertIn(VERSION, result.stdout)
+                    self.assertIn(f"fallback={fallback if fallback is not None else 'unset'}\n", result.stdout)
+                    self.assertIn(hashlib.sha256(before.stdout).hexdigest(), result.stdout)
+                    self.assertIn(hashlib.sha256(expected.encode()).hexdigest(), result.stdout)
 
-    def test_agent_generated_quoted_command_and_operator_chain(self):
+    def test_hosted_failure_diagnostics_do_not_capture_configured_helper_secrets(self):
         self.credential_api()
-        directory = self.home / "agent's bin"
-        directory.mkdir()
-        agent = directory / "buildkite-agent"
-        shutil.copyfile(self.agent, agent)
-        agent.chmod(0o755)
-        (self.bin / "buildkite-agent").unlink()
-        (self.bin / "buildkite-agent").symlink_to(agent)
-        quoted = "'" + str(agent).replace("'", "'\\''") + "'"
-        self.env.update(GIT_CONFIG_COUNT="3", GIT_CONFIG_KEY_0="credential.helper",
-                        GIT_CONFIG_VALUE_0="!echo username=partial",
-                        GIT_CONFIG_KEY_1="credential.helper",
-                        GIT_CONFIG_VALUE_1=f"!{quoted} git-credentials-helper",
-                        GIT_CONFIG_KEY_2="credential.helper", GIT_CONFIG_VALUE_2="!echo quit=true")
-        result = self.hook('printf "url=%s\\n\\n" "$BUILDKITE_REPO" | git credential fill')
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn(f"username=x-access-token\npassword={TOKEN}", result.stdout)
-        self.assertEqual(self.requests, [("/v3/jobs/job-123/repository_access_token",
-                                         {"repo_url": "https://region.entire.io/et/project/repository"})])
-
-    def test_exhausted_or_refused_chain_cannot_prompt_or_fall_back(self):
-        self.script(self.bin / "askpass", '#!/bin/bash\necho invoked > "$HOME/prompted"\necho wrong\n')
-        self.env.update(GIT_ASKPASS=str(self.bin / "askpass"), GIT_TERMINAL_PROMPT="1")
-        for helpers in ([], ["!echo username=partial"], ["!exit 1"],
-                        ["!echo quit=true", "!echo username=wrong; echo password=wrong"]):
-            with self.subTest(helpers=helpers):
-                self.env["GIT_CONFIG_COUNT"] = str(len(helpers))
-                for index, helper in enumerate(helpers):
-                    self.env[f"GIT_CONFIG_KEY_{index}"] = "credential.helper"
-                    self.env[f"GIT_CONFIG_VALUE_{index}"] = helper
-                result = self.hook('printf "url=%s\\n\\n" "$BUILDKITE_REPO" | git credential fill')
-                self.assertEqual(result.returncode, 128, result.stderr)
-                self.assertNotIn("password=", result.stdout)
-                self.assertFalse((self.home / "prompted").exists())
-
-    def test_pinned_remote_helper_requests_native_credentials(self):
-        # Install the real pinned binary, then run it without the adapter.
+        self.response = {"token": "", "message": TOKEN}
         self.assertEqual(self.hook().returncode, 0)
-        self.env.update(GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="credential.helper",
-                        GIT_CONFIG_VALUE_0='!cat > "$HOME/native-request"; echo quit=true')
-        result = subprocess.run([str(self.installed), "origin", URL], input="capabilities\n",
-                                env=self.env, cwd=self.home, text=True, capture_output=True, timeout=30)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertEqual((self.home / "native-request").read_text(),
-                         "protocol=entire\nhost=region.entire.io\npath=et/project/repository\n")
+        active_secret, unrelated_secret = secrets.token_hex(20), secrets.token_hex(20)
+        self.env.update(GIT_CONFIG_COUNT="2", GIT_CONFIG_KEY_0="credential.helper",
+                        GIT_CONFIG_VALUE_0=f"!printf 'password={active_secret}\\n'",
+                        GIT_CONFIG_KEY_1="credential.entire://unrelated.example/private.helper",
+                        GIT_CONFIG_VALUE_1=f"!printf 'username=other\\npassword={unrelated_secret}\\n'")
+        for path in ("et/project/repository", "et/project/repository/child"):
+            for trace in ("0", "1"):
+                with self.subTest(path=path, trace=trace):
+                    self.env["GIT_TRACE"] = trace
+                    result = self.hook(f"printf 'protocol=entire\\nhost=region.entire.io\\npath={path}\\n\\n' | git credential fill")
+                    self.assertEqual(result.returncode, 128)
+                    self.assertTrue(result.stdout == "", "No credentials on failure")
+                    # Do not print captured diagnostics or synthetic secrets if
+                    # a regression fails this assertion.
+                    self.assertFalse(active_secret in result.stderr, "Active configured secret leaked")
+                    self.assertFalse(unrelated_secret in result.stderr, "Unrelated configured secret leaked")
+        self.assertEqual(len(self.requests), 2)
 
     def test_installed_helper_uses_adapter_and_fails_closed_without_leaking_errors(self):
         self.credential_api()
         self.response = {"token": "", "message": TOKEN}
-        self.env.update(GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="credential.helper",
-                        GIT_CONFIG_VALUE_0="!buildkite-agent git-credentials-helper")
         result = self.hook('git ls-remote "$BUILDKITE_REPO"')
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("git credential lookup failed", result.stderr)

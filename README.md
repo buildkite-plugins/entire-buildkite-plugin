@@ -10,28 +10,20 @@ steps:
 ```
 
 Installs or upgrades the Git remote helper when needed and reuses it across jobs.
-Uses the Git credential helpers configured before the environment hook, preserving
-their order, empty resets, and `entire://` URL scopes. There are no plugin options.
+There are no plugin options.
 
-On hosted agents, requires Buildkite's Entire checkout integration and Agent 4.3.0
-or later. On self-hosted agents, configure a Git credential helper for the Entire
-repository before this hook runs. No Entire login is needed.
+On hosted agents (`BUILDKITE_COMPUTE_TYPE=hosted`), Buildkite's Git credential
+integration handles authentication. The plugin filters requests to the exact
+repository, translates the credential protocol to HTTPS for older agents, and
+disables saved Entire login fallback. Agent failures stop authentication rather
+than falling through to other credentials. Requires Buildkite's Entire checkout
+integration and Agent 4.3.0 or later; no Entire login or token configuration is
+needed.
 
-Operator helpers receive the native `entire` protocol. Only a detected Buildkite
-agent helper receives the HTTPS alias required by older agents. Detection supports
-`!buildkite-agent git-credentials-helper` and the agent-generated quoted command
-using the agent on PATH or its resolved path; custom wrappers must handle the
-native protocol themselves.
-
-Resolved-path detection needs `readlink -f`. On a provisioned system without it
-(such as macOS without GNU coreutils), a helper quoting the resolved agent path
-will not be recognized if PATH points to a symlink. Supply GNU `readlink` on PATH
-or configure the helper with the quoted PATH executable instead.
-
-The filter rejects descendant repository paths and leaves unrelated repositories
-unchanged. A refused or exhausted helper chain fails without prompting or falling
-back to a saved Entire login. Agent errors stop the chain. No retrieved tokens or
-Git configuration are written to disk.
+On self-hosted agents, or when compute type is absent or unrecognized, the plugin
+only installs or reuses the remote helper. It leaves Git credential configuration
+and `ENTIRE_GIT_NO_LOGIN_FALLBACK` unchanged. Operators retain control of
+authentication.
 
 Automatic installation supports Linux amd64 and arm64, with Bash, curl, Git,
 GNU coreutils, sed, and tar.

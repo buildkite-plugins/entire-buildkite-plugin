@@ -1,18 +1,17 @@
 # Maintenance
 
 - README.md is end-user documentation: keep purpose, usage, requirements, and
-  actionable limitations concise. Put implementation and testing details in
-  AGENTS.md, not the README. Do not add review history or speculative support.
-- Run `shellcheck hooks/*` and `python3 -B -m unittest discover -s tests -v`.
-  Tests download pinned Entire and Agent binaries and use OpenSSL for a local
-  TLS fixture; no live credentials are used.
-- Run `docker run --rm -v "$PWD:/plugin:ro" buildkite/plugin-linter --id entire`.
-  Fetch tags first; the linter uses local tags to check README release refs.
-  Keep the unversioned development example and an explicit `entire#main: {}`
-  example while unreleased, so the linter can validate the configuration.
-  On the first release, replace the branch example with the actual release tag
-  and update the unreleased notice. Update tagged examples on later releases.
-  Do not bypass example or version validation with skip flags.
+  actionable limitations concise. Requirements there are runtime dependencies
+  only. Do not add contributor workflows, lint-only examples, or unreleased/
+  development framing to satisfy CI. Do not add review history or speculative support.
+- Put development requirements, check commands, and linter examples in
+  CONTRIBUTING.md; keep implementation invariants in AGENTS.md. Run all checks
+  documented in CONTRIBUTING.md before completing changes.
+- Use `--id entire --readme CONTRIBUTING.md` in both CI and the documented
+  plugin-linter command. Keep the README's unversioned end-user example; fix
+  linter configuration rather than changing user guidance to satisfy discovery.
+  Fetch tags for version checks and follow CONTRIBUTING.md when updating refs.
+  Never use skip flags to bypass example or version validation.
 - Only `BUILDKITE_COMPUTE_TYPE=hosted` acquires the selected-repository token,
   once, and exports it as `ENTIRE_TOKEN`. Do not configure Git credentials or
   change operator authentication on other compute types. Never log or write the

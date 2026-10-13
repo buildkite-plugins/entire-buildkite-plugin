@@ -6,10 +6,9 @@ if [[ ! ${BUILDKITE_REPO:-} =~ ^entire://[a-zA-Z0-9.-]+(:[0-9]+)?/[^[:space:]?#]
   exit 1
 fi
 
-# First upstream build with native Git credential lookup; no stable release yet.
+# Pinned build validated against the hosted environment-token flow.
 commit=a564a68c802d50a0f4cff333da6ee13d59be027d
 export PATH="${HOME}/.local/bin:${PATH}"
-export ENTIRE_GIT_NO_LOGIN_FALLBACK=true
 
 helper_is_current() {
   local version
@@ -55,32 +54,32 @@ if ! helper_is_current; then
   )
 fi
 
-# Older agents accept HTTPS credentials only. Translate the credential request,
-# not the checkout URL. The issuer verifies this alias against the selected repo.
-# shellcheck disable=SC2016
-adapter='!f() {
+# Only hosted jobs use Buildkite-issued Entire credentials. Leave operator
+# authentication and saved-login policy untouched everywhere else.
+if [[ ${BUILDKITE_COMPUTE_TYPE:-} == hosted ]]; then
+  entire_trace=$-
   set +x
-  [ "$1" = get ] || return 0
-  request=$(cat)
-  host=$(printf "%s\n" "$request" | sed -n "s/^host=//p")
-  path=$(printf "%s\n" "$request" | sed -n "s/^path=//p")
-  if [ "entire://$host/$path" != "$BUILDKITE_REPO" ]; then
-    printf "quit=true\n"
-    return
+  repository=${BUILDKITE_REPO#entire://}
+  # Agent 4.3.0 exposes repository credentials through this internal command.
+  # Call it once, not through Git. The issuer authorizes the exact HTTPS alias.
+  # Suppress diagnostics: an error response could contain credential material.
+  if ! ENTIRE_TOKEN=$(printf 'protocol=https\nhost=%s\npath=%s\n\n' "${repository%%/*}" "${repository#*/}" \
+    | buildkite-agent git-credentials-helper get 2>/dev/null \
+    | sed -n 's/^password=//p'); then
+    unset ENTIRE_TOKEN
+    echo 'Entire: failed to acquire repository credentials.' >&2
+    exit 1
   fi
-  if credentials=$(printf "%s\n\n" "$request" | sed "s/^protocol=entire$/protocol=https/" | buildkite-agent git-credentials-helper "$@"); then
-    printf "%s\n" "$credentials"
-  else
-    printf "quit=true\n"
+  if [[ -z $ENTIRE_TOKEN || $ENTIRE_TOKEN == *[[:space:]]* ]]; then
+    unset ENTIRE_TOKEN
+    echo 'Entire: repository credential is empty or invalid.' >&2
+    exit 1
   fi
-}; f'
-
-# Job-local config overrides inherited helpers only for this repository. Preserve
-# existing environment config, and reset the helper list before adding ours.
-[[ ${GIT_CONFIG_COUNT:-0} =~ ^[0-9]+$ ]] || { echo 'Entire: invalid GIT_CONFIG_COUNT.' >&2; exit 1; }
-export GIT_CONFIG_COUNT=$((10#${GIT_CONFIG_COUNT:-0}))
-for helper in '' "$adapter"; do
-  export "GIT_CONFIG_KEY_${GIT_CONFIG_COUNT}=credential.${BUILDKITE_REPO}.helper"
-  export "GIT_CONFIG_VALUE_${GIT_CONFIG_COUNT}=$helper"
-  GIT_CONFIG_COUNT=$((GIT_CONFIG_COUNT + 1))
-done
+  # Presence selects Entire's fixed-bearer path; failures cannot fall back to login.
+  export ENTIRE_TOKEN
+  unset repository
+  case $entire_trace in
+    *x*) unset entire_trace; set -x ;;
+    *) unset entire_trace ;;
+  esac
+fi

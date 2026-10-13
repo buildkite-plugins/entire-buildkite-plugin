@@ -6,6 +6,7 @@ requirements:
   - buildkite-agent
   - curl
   - git
+  - readlink
   - sed
   - sha256sum
   - sort

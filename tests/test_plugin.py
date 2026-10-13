@@ -1,16 +1,23 @@
 """Exercise the installation hook and the real helper's native credential lookup."""
 
+import hashlib
+import http.server
+import json
 import os
 from pathlib import Path
 import platform
 import shutil
 import subprocess
+import tarfile
 import tempfile
+import threading
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 COMMIT = "a564a68c802d50a0f4cff333da6ee13d59be027d"
 VERSION = f"0.0.0+{COMMIT}"
+URL = "entire://region.entire.io/et/project/repository"
+TOKEN = "test-job-credential"
 
 
 class PluginTest(unittest.TestCase):
@@ -18,12 +25,24 @@ class PluginTest(unittest.TestCase):
     def setUpClass(cls):
         cls.download = tempfile.TemporaryDirectory()
         cls.addClassCleanup(cls.download.cleanup)
+        arch = {"x86_64": "amd64", "aarch64": "arm64"}[platform.machine()]
         cls.archive = Path(os.environ.get("ENTIRE_TEST_ARCHIVE", f"{cls.download.name}/helper.tar.gz"))
         if not cls.archive.exists():
-            arch = {"x86_64": "amd64", "aarch64": "arm64"}[platform.machine()]
             subprocess.run(["curl", "-qfsSL", "--proto", "=https", "--proto-redir", "=https",
                             f"https://entire-public-release-bucket-7f3e2a01c9b48d56.s3.us-east-2.amazonaws.com/commit/{COMMIT}/git-remote-entire_linux_{arch}.tar.gz",
                             "-o", str(cls.archive)], check=True, timeout=180)
+        # Test the compatibility promise against the released agent, not a mock.
+        archive = Path(cls.download.name) / "agent.tar.gz"
+        subprocess.run(["curl", "-qfsSL", "--proto", "=https", "--proto-redir", "=https",
+                        f"https://github.com/buildkite/agent/releases/download/v4.3.0/buildkite-agent-linux-{arch}-4.3.0.tar.gz",
+                        "-o", str(archive)], check=True, timeout=180)
+        checksum = {"amd64": "f1ee66bdd4c052beebdc406ba5eb1b4246dc740c6872e8d3017ae53c527872b8",
+                    "arm64": "bbd2b19589f2b50eee3c1e0730af96a2f695e0134653fb676553768ea89ed710"}[arch]
+        assert hashlib.sha256(archive.read_bytes()).hexdigest() == checksum
+        cls.agent = Path(cls.download.name) / "buildkite-agent"
+        with tarfile.open(archive) as tar:
+            cls.agent.write_bytes(tar.extractfile("./buildkite-agent").read())
+        cls.agent.chmod(0o755)
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -33,15 +52,41 @@ class PluginTest(unittest.TestCase):
         self.bin.mkdir()
         self.installed = self.home / ".local/bin/git-remote-entire"
         # Do not pick up a host helper, Git configuration, or credentials.
-        for name in ("bash", "git", "sort", "mkdir", "cp", "uname", "mktemp",
+        for name in ("bash", "git", "sort", "mkdir", "cp", "uname", "mktemp", "sed", "cat",
                      "sha256sum", "tar", "gzip", "rm", "mv"):
             (self.bin / name).symlink_to(shutil.which(name))
+        (self.bin / "buildkite-agent").symlink_to(self.agent)
         self.env = {"HOME": str(self.home), "PATH": str(self.bin),
-                    "GIT_CONFIG_NOSYSTEM": "1", "TEST_ARCHIVE": str(self.archive)}
+                    "GIT_CONFIG_NOSYSTEM": "1", "TEST_ARCHIVE": str(self.archive),
+                    "BUILDKITE_REPO": URL, "GIT_TERMINAL_PROMPT": "0"}
         self.script(self.bin / "curl", '''#!/bin/bash
 echo download >> "$HOME/downloads"
 cp "$TEST_ARCHIVE" "${@: -1}"
 ''')
+
+    def credential_api(self):
+        self.requests = []
+        self.response = {"token": TOKEN, "username": "x-access-token"}
+        owner = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                owner.requests.append((self.path, body))
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps(owner.response).encode())
+
+            def log_message(self, *_):
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        self.env.update(BUILDKITE_AGENT_ENDPOINT=f"http://127.0.0.1:{server.server_port}/v3",
+                        BUILDKITE_AGENT_ACCESS_TOKEN="test-agent-session", BUILDKITE_JOB_ID="job-123")
 
     def script(self, path, source):
         path.write_text(source)
@@ -108,24 +153,75 @@ cp "$TEST_ARCHIVE" "${@: -1}"
                 self.assertIn("automatic installation supports", result.stderr)
                 self.assertFalse((self.home / "downloads").exists())
 
-    def test_installed_helper_uses_native_git_credentials_and_refuses_login_fallback(self):
-        self.script(self.bin / "git-credential-test", '''#!/bin/bash
-while IFS= read -r line && [[ -n $line ]]; do
-  printf '%s\n' "$line" >> "$HOME/credential-request"
-done
-printf 'quit=true\n\n'
+    def test_adapter_uses_agent_credentials_without_tokens_in_environment_or_files(self):
+        self.credential_api()
+        # Existing job config and HTTPS helper must survive. For Entire, reset
+        # this helper or its password=fail response prevents our adapter running.
+        self.env.update(GIT_CONFIG_COUNT="2", GIT_CONFIG_KEY_0="credential.helper",
+                        GIT_CONFIG_VALUE_0="!buildkite-agent git-credentials-helper",
+                        GIT_CONFIG_KEY_1="credential.useHttpPath", GIT_CONFIG_VALUE_1="true",
+                        GIT_TRACE="1")
+        for suffix in ("", ".git"):
+            with self.subTest(suffix=suffix):
+                self.env["BUILDKITE_REPO"] = URL + suffix
+                for protocol in ("entire", "https"):
+                    self.env["TEST_PROTOCOL"] = protocol
+                    result = self.hook('''
+[[ -z ${ENTIRE_TOKEN+x} ]]
+credentials=$(printf 'protocol=%s\nhost=region.entire.io\npath=et/project/repository%s\n\n' "$TEST_PROTOCOL" "${BUILDKITE_REPO#''' + URL + '''}" | git credential fill)
+printf '%s' "$credentials" | sha256sum
+unset credentials
+export -p > "$HOME/after-hook"
 ''')
-        (self.home / ".gitconfig").write_text("[credential]\n  helper = test\n  useHttpPath = true\n")
-        result = self.hook('git ls-remote entire://region.entire.io/et/project/repository')
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    expected = (f"protocol={protocol}\nhost=region.entire.io\n"
+                                f"path=et/project/repository{suffix}\nusername=x-access-token\npassword={TOKEN}")
+                    self.assertIn(hashlib.sha256(expected.encode()).hexdigest(), result.stdout)
+                    self.assertNotIn(TOKEN, result.stdout + result.stderr)
+                    self.assertNotIn(TOKEN, (self.home / "after-hook").read_text())
+                    self.assertEqual(self.requests[-1], ("/v3/jobs/job-123/repository_access_token",
+                                                       {"repo_url": f"https://region.entire.io/et/project/repository{suffix}"}))
+        self.assertEqual(len(self.requests), 4)
+        self.assertFalse((self.home / ".gitconfig").exists())
+
+    def test_adapter_is_scoped_and_not_persisted_for_other_jobs(self):
+        self.credential_api()
+        self.env.update(GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="credential.helper",
+                        GIT_CONFIG_VALUE_0="!echo username=unrelated; echo password=unrelated")
+        for path in ("et/project/other", "et/project/repository/child"):
+            result = self.hook(f"printf 'protocol=entire\\nhost=region.entire.io\\npath={path}\\n\\n' | git credential fill")
+            if path.endswith("/child"):
+                # Git URL scopes also match descendants; the adapter must reject
+                # those explicitly rather than forwarding a broader request.
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn("password=", result.stdout)
+                continue
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("password=unrelated", result.stdout)
+        self.assertEqual(self.requests, [])
+        result = subprocess.run(["git", "config", "--get-all", "credential.helper"],
+                                env=self.env, text=True, capture_output=True, check=True)
+        self.assertEqual(result.stdout.strip(), self.env["GIT_CONFIG_VALUE_0"])
+
+    def test_installed_helper_uses_adapter_and_fails_closed_without_leaking_errors(self):
+        self.credential_api()
+        self.response = {"token": "", "message": TOKEN}
+        result = self.hook('git ls-remote "$BUILDKITE_REPO"')
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("git credential lookup failed", result.stderr)
-        self.assertEqual((self.home / "credential-request").read_text(),
-                         "protocol=entire\nhost=region.entire.io\npath=et/project/repository\n")
-        # A silent helper failure must not substitute a saved personal login.
-        self.script(self.bin / "git-credential-test", "#!/bin/sh\nexit 1\n")
-        result = self.hook('git ls-remote entire://region.entire.io/et/project/repository')
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("saved-login fallback is disabled", result.stderr)
+        self.assertNotIn(TOKEN, result.stdout + result.stderr)
+        self.assertEqual(self.requests, [("/v3/jobs/job-123/repository_access_token",
+                                         {"repo_url": "https://region.entire.io/et/project/repository"})])
+
+    def test_invalid_repository_cannot_broaden_credential_scope(self):
+        for url in ("", "https://region.entire.io/et/p/r", "entire://*.entire.io/et/p/r",
+                    "entire://token@region.entire.io/et/p/r", URL + "\nhost=other.entire.io"):
+            with self.subTest(url=url):
+                self.env["BUILDKITE_REPO"] = url
+                result = self.hook()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("must be a native", result.stderr)
+                self.assertFalse((self.home / "downloads").exists())
 
 
 if __name__ == "__main__":

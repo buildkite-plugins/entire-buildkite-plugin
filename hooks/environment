@@ -6,7 +6,7 @@ if [[ ! ${BUILDKITE_REPO:-} =~ ^entire://[a-zA-Z0-9.-]+(:[0-9]+)?/[^[:space:]?#]
   exit 1
 fi
 
-# v0.11.5 commit build validated against the hosted environment-token flow.
+# v0.11.5 commit build validated against the environment-token flow.
 commit=4b8cdfaf0d15e236835c3b7c85d8803b112574bc
 export PATH="${HOME}/.local/bin:${PATH}"
 
@@ -54,35 +54,30 @@ if ! helper_is_current; then
   )
 fi
 
-# Only hosted jobs use Buildkite-issued Entire credentials. Leave operator
-# authentication and saved-login policy untouched everywhere else.
-if [[ ${BUILDKITE_COMPUTE_TYPE:-} == hosted ]]; then
-  entire_trace=$-
-  set +x
+# Preserve operator credentials; otherwise try Buildkite on any agent type.
+# Even testing an existing token must happen with tracing disabled.
+entire_trace=$-
+set +x
+if [[ -z ${ENTIRE_TOKEN:-} ]]; then
   repository=${BUILDKITE_REPO#entire://}
   # Agent 4.3.0 exposes repository credentials through this internal command.
   # Call it once, not through Git. The issuer authorizes the exact HTTPS alias.
   # Suppress diagnostics: an error response could contain credential material.
-  if ! ENTIRE_TOKEN=$(printf 'protocol=https\nhost=%s\npath=%s\n\n' "${repository%%/*}" "${repository#*/}" \
+  if ENTIRE_TOKEN=$(printf 'protocol=https\nhost=%s\npath=%s\n\n' "${repository%%/*}" "${repository#*/}" \
     | buildkite-agent git-credentials-helper get 2>/dev/null \
-    | sed -n 's/^password=//p'); then
+    | sed -n 's/^password=//p') && [[ -n $ENTIRE_TOKEN && $ENTIRE_TOKEN != *[[:space:]]* ]]; then
+    # Presence selects Entire's fixed-bearer path, with no login fallback.
+    export ENTIRE_TOKEN
+  else
+    # Issuance is optional. Leave saved-login and fallback policy untouched.
     unset ENTIRE_TOKEN
-    echo 'Entire: failed to acquire repository credentials.' >&2
-    exit 1
   fi
-  if [[ -z $ENTIRE_TOKEN || $ENTIRE_TOKEN == *[[:space:]]* ]]; then
-    unset ENTIRE_TOKEN
-    echo 'Entire: repository credential is empty or invalid.' >&2
-    exit 1
-  fi
-  # Presence selects Entire's fixed-bearer path; failures cannot fall back to login.
-  export ENTIRE_TOKEN
   unset repository
-  case $entire_trace in
-    *x*) unset entire_trace; set -x ;;
-    *) unset entire_trace ;;
-  esac
 fi
+case $entire_trace in
+  *x*) unset entire_trace; set -x ;;
+  *) unset entire_trace ;;
+esac
 
 # v0.11.5 removed the helper's opt-out. Keep jobs from using a saved identity
 # when it was explicitly forbidden. Test presence, never the secret value.

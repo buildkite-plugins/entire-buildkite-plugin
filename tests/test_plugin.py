@@ -1,4 +1,4 @@
-"""Exercise installation and hosted environment-token handoff with real binaries."""
+"""Exercise installation and environment-token handoff with real binaries."""
 
 import base64
 import hashlib
@@ -160,21 +160,24 @@ cp "$TEST_ARCHIVE" "${@: -1}"
                 self.assertIn("automatic installation supports", result.stderr)
                 self.assertFalse((self.home / "downloads").exists())
 
-    def test_hosted_token_is_exported_once_without_config_changes_or_leaks(self):
+    def test_token_is_exported_once_without_config_changes_or_leaks(self):
         self.credential_api()
         token = self.response["token"]
-        self.env.update(ENTIRE_TOKEN="old-operator-token", ENTIRE_GIT_NO_LOGIN_FALLBACK="false",
+        self.env.update(ENTIRE_TOKEN="", ENTIRE_GIT_NO_LOGIN_FALLBACK="true",
                         GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="credential.helper",
                         GIT_CONFIG_VALUE_0="!echo quit=true", GIT_TRACE="1")
         before = subprocess.run(["git", "config", "--null", "--list"], env=self.env,
                                 cwd=self.home, capture_output=True, check=True)
-        for suffix in ("", ".git"):
+        for compute, suffix in (("hosted", ""), ("self-hosted", ".git"), ("unknown", ""), (None, ".git")):
+            self.env.pop("BUILDKITE_COMPUTE_TYPE", None)
+            if compute is not None:
+                self.env["BUILDKITE_COMPUTE_TYPE"] = compute
             for trace in (False, True):
-                with self.subTest(suffix=suffix, trace=trace):
+                with self.subTest(compute=compute, suffix=suffix, trace=trace):
                     self.env["BUILDKITE_REPO"] = URL + suffix
                     result = self.hook('''
 python3 -c 'import hashlib, os; token = os.environ["ENTIRE_TOKEN"]; assert [k for k, v in os.environ.items() if token in v] == ["ENTIRE_TOKEN"]; print(hashlib.sha256(token.encode()).hexdigest())'
-[[ $ENTIRE_GIT_NO_LOGIN_FALLBACK == false ]]
+[[ $ENTIRE_GIT_NO_LOGIN_FALLBACK == true ]]
 git config --null --list | sha256sum
 case $- in *x*) echo tracing=on ;; *) echo tracing=off ;; esac
 ''', trace=trace)
@@ -185,25 +188,37 @@ case $- in *x*) echo tracing=on ;; *) echo tracing=off ;; esac
                     self.assertFalse(token in result.stdout + result.stderr, "Token leaked to output")
                     self.assertEqual(self.requests[-1], ("/v3/jobs/job-123/repository_access_token",
                                                        {"repo_url": f"https://region.entire.io/et/project/repository{suffix}"}))
-        self.assertEqual(len(self.requests), 4)
+        self.assertEqual(len(self.requests), 8)
         for path in self.home.rglob("*"):
             if path.is_file() and not path.is_symlink():
                 self.assertFalse(token.encode() in path.read_bytes(), "Token persisted to a file")
 
-    def test_hosted_credential_errors_fail_without_leaking_or_using_operator_token(self):
+    def test_credential_errors_continue_without_token_or_leaks(self):
         self.credential_api()
         secret = secrets.token_hex(20)
-        self.env["ENTIRE_TOKEN"] = secret
-        for status, token in ((200, ""), (200, " \t"), (403, secret)):
-            with self.subTest(status=status, empty=not token):
-                self.response_status = status
-                self.response = {"token": token, "message": secret}
-                result = self.hook('echo continued', trace=True)
-                self.assertEqual(result.returncode, 1)
-                self.assertNotIn("continued", result.stdout)
-                self.assertIn("Entire:", result.stderr)
-                self.assertFalse(secret in result.stdout + result.stderr, "Credential leaked to output")
-        self.assertEqual(len(self.requests), 3)
+        self.env.update(ENTIRE_TOKEN="", ENTIRE_GIT_NO_LOGIN_FALLBACK="false")
+        for compute in ("hosted", "self-hosted"):
+            self.env["BUILDKITE_COMPUTE_TYPE"] = compute
+            for status, token in ((200, ""), (200, " \t"), (200, secret + " invalid"),
+                                  (200, secret + "\npassword=second"), (403, secret)):
+                with self.subTest(compute=compute, status=status, empty=not token):
+                    self.response_status = status
+                    self.response = {"token": token, "message": secret}
+                    result = self.hook('''
+[[ -z ${ENTIRE_TOKEN+x} ]]
+[[ $ENTIRE_GIT_NO_LOGIN_FALLBACK == false ]]
+case $- in *x*) echo continued ;; *) exit 1 ;; esac
+''', trace=True)
+                    self.assertEqual(result.returncode, 0)
+                    self.assertIn("continued", result.stdout)
+                    self.assertFalse(secret in result.stdout + result.stderr, "Credential leaked to output")
+        self.assertEqual(len(self.requests), 10)
+
+    def test_missing_credential_helper_does_not_mask_later_failures(self):
+        (self.bin / "buildkite-agent").unlink()
+        result = self.hook('[[ -z ${ENTIRE_TOKEN+x} ]]; echo continued; exit 42', trace=True)
+        self.assertEqual(result.returncode, 42)
+        self.assertIn("continued", result.stdout)
 
     def test_pinned_helper_uses_environment_bearer_and_server_repository_authorization(self):
         self.credential_api()
@@ -299,9 +314,11 @@ if git -c protocol.version=0 ls-remote "${BUILDKITE_REPO%/*}/other"; then exit 1
                         ENTIRE_TOKEN_STORE="file", ENTIRE_TOKEN_STORE_PATH=str(store),
                         XDG_CACHE_HOME=str(self.home / "cache"))
         self.env.pop("GIT_HTTP_USER_AGENT", None)
-        self.requests.clear()
+        # Issuance is unavailable; the existing login policy still applies.
+        self.response_status = 403
         for fallback in ("true", "1", "T", "TRUE", "True", "t", "", "typo", " true"):
             with self.subTest(fallback=fallback):
+                self.requests.clear()
                 self.env["ENTIRE_GIT_NO_LOGIN_FALLBACK"] = fallback
                 git_requests.clear()
                 user_agents.clear()
@@ -309,10 +326,12 @@ if git -c protocol.version=0 ls-remote "${BUILDKITE_REPO%/*}/other"; then exit 1
                 self.assertNotEqual(result.returncode, 0)
                 self.assertEqual(git_requests, [], "Used saved identity despite login opt-out")
                 self.assertEqual(user_agents, [], "Contacted Entire despite login opt-out")
+                self.assertEqual(len(self.requests), 1)
 
         # Prove the saved identity works when login fallback is permitted.
         for fallback in (None, "false", "0", "f", "F", "FALSE", "False"):
             with self.subTest(fallback=fallback):
+                self.requests.clear()
                 self.env.pop("ENTIRE_GIT_NO_LOGIN_FALLBACK", None)
                 if fallback is not None:
                     self.env["ENTIRE_GIT_NO_LOGIN_FALLBACK"] = fallback
@@ -322,11 +341,13 @@ if git -c protocol.version=0 ls-remote "${BUILDKITE_REPO%/*}/other"; then exit 1
                 self.assertIn("1" * 40 + "\trefs/heads/main", result.stdout)
                 self.assertTrue(git_requests)
                 self.assertTrue(all(auth == f"Bearer {saved_token}" for _, auth in git_requests))
+                self.assertEqual(len(self.requests), 1)
 
-        # Token presence takes precedence, even over an invalid fallback setting.
+        # A supplied token takes precedence; an empty one needs acquisition.
         self.env["ENTIRE_GIT_NO_LOGIN_FALLBACK"] = "typo"
         for supplied in (token, ""):
-            with self.subTest(token_present=bool(supplied)):
+            with self.subTest(token_nonempty=bool(supplied)):
+                self.requests.clear()
                 self.env["ENTIRE_TOKEN"] = supplied
                 git_requests.clear()
                 result = self.hook('git -c protocol.version=0 ls-remote "$BUILDKITE_REPO"', trace=True)
@@ -338,15 +359,17 @@ if git -c protocol.version=0 ls-remote "${BUILDKITE_REPO%/*}/other"; then exit 1
                 else:
                     self.assertNotEqual(result.returncode, 0)
                     self.assertEqual(git_requests, [], "Empty token fell back to saved identity")
-        self.assertEqual(self.requests, [])
+                self.assertEqual(len(self.requests), 0 if supplied else 1)
 
-    def test_non_hosted_jobs_preserve_operator_auth_and_fallback_policy(self):
+    def test_existing_token_preserves_operator_auth_without_request_or_leaks(self):
+        self.credential_api()
         self.env.update(GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="credential.helper",
                         GIT_CONFIG_VALUE_0="!echo quit=true")
         before = subprocess.run(["git", "config", "--null", "--list"], env=self.env,
                                 cwd=self.home, capture_output=True, check=True)
-        for compute, token, fallback in (("self-hosted", secrets.token_hex(20), "false"),
-                                          (None, None, None), ("unknown", "", "true")):
+        token = secrets.token_hex(20)
+        for compute, fallback in (("hosted", "false"), ("self-hosted", "true"),
+                                  (None, None), ("unknown", "false")):
             with self.subTest(compute=compute):
                 for name, value in (("BUILDKITE_COMPUTE_TYPE", compute), ("ENTIRE_TOKEN", token),
                                     ("ENTIRE_GIT_NO_LOGIN_FALLBACK", fallback)):
@@ -358,12 +381,14 @@ git-remote-entire --version
 python3 -c 'import hashlib, os; token = os.environ.get("ENTIRE_TOKEN"); print("unset" if token is None else hashlib.sha256(token.encode()).hexdigest())'
 printf 'fallback=%s\\n' "${ENTIRE_GIT_NO_LOGIN_FALLBACK-unset}"
 git config --null --list | sha256sum
-''')
+''', trace=True)
                 self.assertEqual(result.returncode, 0)
                 self.assertIn(VERSION, result.stdout)
-                self.assertIn("unset" if token is None else hashlib.sha256(token.encode()).hexdigest(), result.stdout)
+                self.assertIn(hashlib.sha256(token.encode()).hexdigest(), result.stdout)
                 self.assertIn(f"fallback={fallback if fallback is not None else 'unset'}\n", result.stdout)
                 self.assertIn(hashlib.sha256(before.stdout).hexdigest(), result.stdout)
+                self.assertFalse(token in result.stdout + result.stderr, "Token leaked to output")
+        self.assertEqual(self.requests, [])
 
     def test_invalid_repository_cannot_broaden_credential_scope(self):
         for url in ("", "https://region.entire.io/et/p/r", "entire://*.entire.io/et/p/r",

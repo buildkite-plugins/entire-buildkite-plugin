@@ -29,8 +29,10 @@ fallback settings.
 Do not print `ENTIRE_TOKEN` or dump the job's environment. Hosted credentials are
 not refreshed and can expire during long jobs.
 
+## Runtime requirements
+
 Automatic installation supports Linux amd64 and arm64, with Bash, curl, Git,
-GNU coreutils, sed, and tar.
+GNU coreutils, gzip, sed, and tar.
 
 ## License
 

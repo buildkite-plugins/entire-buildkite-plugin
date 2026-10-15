@@ -17,7 +17,7 @@ import threading
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-COMMIT = "a564a68c802d50a0f4cff333da6ee13d59be027d"
+COMMIT = "4b8cdfaf0d15e236835c3b7c85d8803b112574bc"
 VERSION = f"0.0.0+{COMMIT}"
 URL = "entire://region.entire.io/et/project/repository"
 
@@ -116,8 +116,7 @@ cp "$TEST_ARCHIVE" "${@: -1}"
         self.assertFalse((self.home / ".gitconfig").exists())
 
     def test_supported_versions_are_not_replaced_or_downgraded(self):
-        for version in (VERSION, "0.11.5-nightly.202610120640.a564a68c8",
-                        "0.11.5", "0.11.10", "0.12.0", "1.0.0+build"):
+        for version in (VERSION, "0.11.5", "0.11.10", "0.12.0", "1.0.0+build"):
             with self.subTest(version=version):
                 self.script(self.bin / "git-remote-entire", f"#!/bin/sh\necho 'git-remote-entire {version}'\n")
                 result = self.hook()
@@ -128,6 +127,8 @@ cp "$TEST_ARCHIVE" "${@: -1}"
 
     def test_old_and_unidentifiable_versions_are_replaced_even_ahead_on_path(self):
         for version, status in (("0.11.4", 0), ("0.9.99", 0),
+                                ("0.11.5-nightly.202610120640.a564a68c8", 0),
+                                ("0.0.0+a564a68c802d50a0f4cff333da6ee13d59be027d", 0),
                                 ("0.0.0+57de2c37992efdbcc0519bda2376ccf93f3020c2", 0),
                                 ("unknown", 0), ("0.11.5", 1)):
             with self.subTest(version=version, status=status):
@@ -212,6 +213,7 @@ case $- in *x*) echo tracing=on ;; *) echo tracing=off ;; esac
                         "-subj", "/CN=127.0.0.1", "-addext", "subjectAltName=IP:127.0.0.1"],
                        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         git_requests = []
+        user_agents = []
         oid = b"1" * 40
         lines = [b"# service=git-upload-pack\n", None,
                  oid + b" HEAD\0symref=HEAD:refs/heads/main object-format=sha1\n",
@@ -221,6 +223,7 @@ case $- in *x*) echo tracing=on ;; *) echo tracing=off ;; esac
 
         class Handler(http.server.BaseHTTPRequestHandler):
             def do_GET(self):
+                user_agents.append(self.headers.get("User-Agent"))
                 if self.path == "/.well-known/entire-cluster.json":
                     self.send_response(200)
                     self.send_header("Content-Type", "application/json")
@@ -254,19 +257,31 @@ case $- in *x*) echo tracing=on ;; *) echo tracing=off ;; esac
         self.env.update(BUILDKITE_REPO=origin.replace("https://", "entire://") + "/et/project/repository",
                         SSL_CERT_FILE=str(cert), GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="credential.helper",
                         GIT_CONFIG_VALUE_0='!echo used > "$HOME/git-used"; echo quit=true')
-        result = self.hook('''
+        for user_agent, expected in ((None, f"git-remote-entire/{VERSION}"),
+                                     ("buildkite-agent/4.3.0 stable-pin-test", "buildkite-agent/4.3.0 stable-pin-test"),
+                                     ("", None)):
+            with self.subTest(user_agent=user_agent):
+                self.env.pop("GIT_HTTP_USER_AGENT", None)
+                if user_agent is not None:
+                    self.env["GIT_HTTP_USER_AGENT"] = user_agent
+                self.requests.clear()
+                git_requests.clear()
+                user_agents.clear()
+                result = self.hook('''
 git -c protocol.version=0 ls-remote "$BUILDKITE_REPO"
 if git -c protocol.version=0 ls-remote "${BUILDKITE_REPO%/*}/other"; then exit 1; fi
 ''')
-        self.assertEqual(result.returncode, 0)
-        self.assertIn("1" * 40 + "\trefs/heads/main", result.stdout)
-        self.assertFalse((self.home / "git-used").exists())
-        self.assertFalse(token in result.stdout + result.stderr, "Bearer leaked to output")
-        self.assertEqual(self.requests, [("/v3/jobs/job-123/repository_access_token",
-                                         {"repo_url": origin + "/et/project/repository"})])
-        self.assertTrue(any("/repository/info/refs" in path for path, _ in git_requests))
-        self.assertTrue(any("/other/info/refs" in path for path, _ in git_requests))
-        self.assertTrue(all(auth == f"Bearer {token}" for _, auth in git_requests), "Wrong bearer")
+                self.assertEqual(result.returncode, 0)
+                self.assertIn("1" * 40 + "\trefs/heads/main", result.stdout)
+                self.assertFalse((self.home / "git-used").exists())
+                self.assertFalse(token in result.stdout + result.stderr, "Bearer leaked to output")
+                self.assertEqual(self.requests, [("/v3/jobs/job-123/repository_access_token",
+                                                 {"repo_url": origin + "/et/project/repository"})])
+                self.assertTrue(any("/repository/info/refs" in path for path, _ in git_requests))
+                self.assertTrue(any("/other/info/refs" in path for path, _ in git_requests))
+                self.assertTrue(all(auth == f"Bearer {token}" for _, auth in git_requests), "Wrong bearer")
+                self.assertTrue(user_agents)
+                self.assertEqual(set(user_agents), {expected})
 
     def test_non_hosted_jobs_preserve_operator_auth_and_fallback_policy(self):
         self.env.update(GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="credential.helper",

@@ -6,8 +6,8 @@ if [[ ! ${BUILDKITE_REPO:-} =~ ^entire://[a-zA-Z0-9.-]+(:[0-9]+)?/[^[:space:]?#]
   exit 1
 fi
 
-# Pinned build validated against the hosted environment-token flow.
-commit=a564a68c802d50a0f4cff333da6ee13d59be027d
+# v0.11.5 commit build validated against the hosted environment-token flow.
+commit=4b8cdfaf0d15e236835c3b7c85d8803b112574bc
 export PATH="${HOME}/.local/bin:${PATH}"
 
 helper_is_current() {
@@ -15,7 +15,7 @@ helper_is_current() {
   version="$(git-remote-entire --version 2>/dev/null)" || return 1
   version="${version%%$'\n'*}"
   case "$version" in
-    "git-remote-entire 0.0.0+$commit"|"git-remote-entire 0.11.5-nightly.202610120640.a564a68c8") return 0 ;;
+    "git-remote-entire 0.0.0+$commit") return 0 ;;
   esac
   # Unknown development builds cannot be ordered by commit hash.
   [[ $version =~ ^git-remote-entire\ ([0-9]+\.[0-9]+\.[0-9]+)(\+[^[:space:]]+)?$ ]] &&
@@ -31,10 +31,10 @@ if ! helper_is_current; then
     case "$(uname -m)" in
       x86_64|amd64)
         arch=amd64
-        checksum=8ff942546a8abbb470cd0bbf7d86173f989cfcee66fc688747bccd662e5e0c75 ;;
+        checksum=11643ca11f402ee8b78f552d43aedac8fac2208973bfde2cb354d3a388bedafb ;;
       aarch64|arm64)
         arch=arm64
-        checksum=38686012904a479e30d008a17f5b4023b312207dbccb359d9fb7b33c00d0f277 ;;
+        checksum=5e2ddb7818ec6547aaf55fbf1c389d6a5bc135241558a9b27fa17ce30bb64bc7 ;;
       *) echo 'Entire: automatic installation supports amd64 and arm64 only.' >&2; exit 1 ;;
     esac
 

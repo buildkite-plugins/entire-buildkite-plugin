@@ -26,6 +26,10 @@ for the agent user, including `git-remote-entire` on `PATH`. On all non-hosted
 agents, the plugin preserves your Git credentials, `ENTIRE_TOKEN`, and login
 fallback settings.
 
+Entire v0.11.5 no longer reads Git credentials. If `ENTIRE_TOKEN` is unset and
+`ENTIRE_GIT_NO_LOGIN_FALLBACK=true`, the plugin fails rather than use a saved
+Entire login. Supply `ENTIRE_TOKEN` for jobs that disable saved-login fallback.
+
 Do not print `ENTIRE_TOKEN` or dump the job's environment. Hosted credentials are
 not refreshed and can expire during long jobs.
 

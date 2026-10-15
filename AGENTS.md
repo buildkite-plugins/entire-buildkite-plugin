@@ -22,6 +22,11 @@
   It is not installed as a Git credential helper. Empty/error credentials fail
   the hook with generic diagnostics. Missing/unknown compute types, like
   self-hosted agents, retain operator authentication and fallback policy.
+- v0.11.5 removed Git credential lookup and `ENTIRE_GIT_NO_LOGIN_FALLBACK`.
+  When `ENTIRE_TOKEN` is unset, the hook must fail closed for an explicit login
+  opt-out or invalid boolean, matching the old helper's `strconv.ParseBool`
+  semantics. An absent opt-out allows saved login. A present token takes
+  precedence; the helper rejects an empty token without using saved login.
 - The pinned [v0.11.5 commit](https://github.com/entireio/cli/commit/4b8cdfaf0d15e236835c3b7c85d8803b112574bc)
   is validated against the environment-token flow and `GIT_HTTP_USER_AGENT`.
   Commit artifacts report `0.0.0+<commit>`, not the release version. Update both

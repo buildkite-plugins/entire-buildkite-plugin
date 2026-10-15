@@ -232,7 +232,7 @@ case $- in *x*) echo tracing=on ;; *) echo tracing=off ;; esac
                     return
                 git_requests.append((self.path, self.headers.get("Authorization")))
                 allowed = (self.path == "/et/project/repository/info/refs?service=git-upload-pack"
-                           and self.headers.get("Authorization") == f"Bearer {token}")
+                           and self.headers.get("Authorization") in {f"Bearer {token}", f"Bearer {saved_token}"})
                 self.send_response(200 if allowed else 403)
                 self.send_header("Content-Type", "application/x-git-upload-pack-advertisement")
                 self.end_headers()
@@ -250,6 +250,9 @@ case $- in *x*) echo tracing=on ;; *) echo tracing=off ;; esac
         # not its signature. Live Entire owns token signature/scope validation.
         token = ".".join(base64.urlsafe_b64encode(json.dumps(value).encode()).rstrip(b"=").decode()
                          for value in ({"alg": "HS256"}, {"aud": origin})) + ".c2lnbmF0dXJl"
+        saved_token = ".".join(base64.urlsafe_b64encode(json.dumps(value).encode()).rstrip(b"=").decode()
+                               for value in ({"alg": "HS256"}, {"iss": origin, "handle": "fixture-user",
+                                                                       "exp": 4102444800})) + ".c2lnbmF0dXJl"
         threading.Thread(target=server.serve_forever, daemon=True).start()
         self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)
@@ -282,6 +285,60 @@ if git -c protocol.version=0 ls-remote "${BUILDKITE_REPO%/*}/other"; then exit 1
                 self.assertTrue(all(auth == f"Bearer {token}" for _, auth in git_requests), "Wrong bearer")
                 self.assertTrue(user_agents)
                 self.assertEqual(set(user_agents), {expected})
+
+        # A usable saved identity must not bypass an explicit login opt-out.
+        config = self.home / "entire-config"
+        config.mkdir()
+        (config / "contexts.json").write_text(json.dumps({
+            "current_context": "fixture", "contexts": [{"name": "fixture", "core_url": origin,
+            "handle": "fixture-user", "keychain_service": f"entire-core:{origin}"}]}))
+        store = self.home / "tokens.json"
+        store.write_text(json.dumps({f"entire-core:{origin}": {"fixture-user": saved_token + "|4102444800"},
+                                    f"entire-core:{origin}:refresh": {"fixture-user": "fixture-refresh"}}))
+        self.env.update(BUILDKITE_COMPUTE_TYPE="self-hosted", ENTIRE_CONFIG_DIR=str(config),
+                        ENTIRE_TOKEN_STORE="file", ENTIRE_TOKEN_STORE_PATH=str(store),
+                        XDG_CACHE_HOME=str(self.home / "cache"))
+        self.env.pop("GIT_HTTP_USER_AGENT", None)
+        self.requests.clear()
+        for fallback in ("true", "1", "T", "TRUE", "True", "t", "", "typo", " true"):
+            with self.subTest(fallback=fallback):
+                self.env["ENTIRE_GIT_NO_LOGIN_FALLBACK"] = fallback
+                git_requests.clear()
+                user_agents.clear()
+                result = self.hook('git -c protocol.version=0 ls-remote "$BUILDKITE_REPO"', trace=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(git_requests, [], "Used saved identity despite login opt-out")
+                self.assertEqual(user_agents, [], "Contacted Entire despite login opt-out")
+
+        # Prove the saved identity works when login fallback is permitted.
+        for fallback in (None, "false", "0", "f", "F", "FALSE", "False"):
+            with self.subTest(fallback=fallback):
+                self.env.pop("ENTIRE_GIT_NO_LOGIN_FALLBACK", None)
+                if fallback is not None:
+                    self.env["ENTIRE_GIT_NO_LOGIN_FALLBACK"] = fallback
+                git_requests.clear()
+                result = self.hook('git -c protocol.version=0 ls-remote "$BUILDKITE_REPO"')
+                self.assertEqual(result.returncode, 0)
+                self.assertIn("1" * 40 + "\trefs/heads/main", result.stdout)
+                self.assertTrue(git_requests)
+                self.assertTrue(all(auth == f"Bearer {saved_token}" for _, auth in git_requests))
+
+        # Token presence takes precedence, even over an invalid fallback setting.
+        self.env["ENTIRE_GIT_NO_LOGIN_FALLBACK"] = "typo"
+        for supplied in (token, ""):
+            with self.subTest(token_present=bool(supplied)):
+                self.env["ENTIRE_TOKEN"] = supplied
+                git_requests.clear()
+                result = self.hook('git -c protocol.version=0 ls-remote "$BUILDKITE_REPO"', trace=True)
+                if supplied:
+                    self.assertEqual(result.returncode, 0)
+                    self.assertTrue(git_requests)
+                    self.assertTrue(all(auth == f"Bearer {token}" for _, auth in git_requests))
+                    self.assertFalse(token in result.stdout + result.stderr, "Bearer leaked to output")
+                else:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertEqual(git_requests, [], "Empty token fell back to saved identity")
+        self.assertEqual(self.requests, [])
 
     def test_non_hosted_jobs_preserve_operator_auth_and_fallback_policy(self):
         self.env.update(GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="credential.helper",

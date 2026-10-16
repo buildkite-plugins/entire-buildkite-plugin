@@ -79,32 +79,14 @@ case $entire_trace in
   *) unset entire_trace ;;
 esac
 
-# Unset here means acquisition failed. Self-hosted agents need provider opt-in.
-# The job does not know the provider ID, so link the providers list.
-credential_guidance() {
-  local org=${BUILDKITE_ORGANIZATION_SLUG:-}
-  [[ $org =~ ^[A-Za-z0-9][A-Za-z0-9-]*$ ]] || org='~'
-  echo 'Entire: Self-hosted agents need Agent v4.3.0 or later and "Allow self-hosted agents to use checkout credentials" enabled in the Entire repository provider settings:'
-  echo "Entire: https://buildkite.com/organizations/${org}/repository-providers"
-  echo 'Entire: Or export ENTIRE_TOKEN in an agent environment hook.'
-}
-
 # v0.11.5 removed the helper's opt-out. Keep jobs from using a saved identity
 # when it was explicitly forbidden. Test presence, never the secret value.
 if [[ ! ${ENTIRE_TOKEN+x} ]]; then
   case ${ENTIRE_GIT_NO_LOGIN_FALLBACK-false} in
     1|t|T|true|TRUE|True)
-      {
-        echo 'Entire: Buildkite did not issue checkout credentials, and saved-login fallback is disabled.'
-        credential_guidance
-      } >&2
+      echo 'Entire: saved-login fallback is disabled; supply ENTIRE_TOKEN.' >&2
       exit 1 ;;
-    0|f|F|false|FALSE|False)
-      {
-        echo '~~~ :warning: Entire: Buildkite did not issue checkout credentials'
-        credential_guidance
-        echo 'Entire: Continuing with a saved Entire login, if one exists.'
-      } >&2 ;;
+    0|f|F|false|FALSE|False) ;;
     *) echo 'Entire: ENTIRE_GIT_NO_LOGIN_FALLBACK must be a boolean (true or false).' >&2; exit 1 ;;
   esac
 fi

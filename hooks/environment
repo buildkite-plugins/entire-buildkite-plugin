@@ -60,7 +60,7 @@ entire_trace=$-
 set +x
 if [[ -z ${ENTIRE_TOKEN:-} ]]; then
   repository=${BUILDKITE_REPO#entire://}
-  # Agent 4.3.0 exposes repository credentials through this internal command.
+  # The agent exposes repository credentials through this internal command.
   # Call it once, not through Git. The issuer authorizes the exact HTTPS alias.
   # Suppress diagnostics: an error response could contain credential material.
   if ENTIRE_TOKEN=$(printf 'protocol=https\nhost=%s\npath=%s\n\n' "${repository%%/*}" "${repository#*/}" \

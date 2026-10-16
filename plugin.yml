@@ -7,6 +7,7 @@ requirements:
   - curl
   - git
   - gzip
+  - head
   - mkdir
   - mktemp
   - mv
@@ -15,6 +16,7 @@ requirements:
   - sha256sum
   - sort
   - tar
+  - tee
   - uname
 configuration:
   additionalProperties: false

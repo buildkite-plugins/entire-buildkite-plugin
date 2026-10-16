@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# Put on PATH by hooks/environment for one job. Runs the real Entire helper
+# unchanged and, the first time it fails, explains the job's credentials.
+# Git talks to the helper over stdin/stdout; only stderr is copied.
+set +x
+set -uo pipefail
+
+state=${ENTIRE_BUILDKITE_PLUGIN_STATE:-}
+helper=
+[[ -n $state && -r $state/helper ]] && helper=$(<"$state/helper")
+if [[ ! -x $helper ]]; then
+  echo 'Entire: the plugin could not find git-remote-entire.' >&2
+  exit 127
+fi
+
+errors=$(mktemp "$state/helper.XXXXXXXX") || exec "$helper" "$@"
+# Stdout goes straight to Git through fd 3; stderr is copied through tee.
+{ "$helper" "$@" 2>&1 >&3 3>&- | tee "$errors" >&2; } 3>&1
+status=${PIPESTATUS[0]}
+
+if (( status != 0 )) && mkdir "$state/explained" 2>/dev/null; then
+  message=$(<"$errors")
+  (( ${#message} > 4096 )) && message=${message: -4096}
+  # Never read the token itself; only whether one is set.
+  entire_source=none entire_reason=unknown
+  while IFS='=' read -r key value; do
+    case $key in
+      source) entire_source=$value ;;
+      reason) entire_reason=$value ;;
+    esac
+  done < "$state/credentials"
+  token=${ENTIRE_TOKEN:+set}
+  if [[ $token == set && $entire_source == none ]]; then
+    entire_source=job
+  elif [[ $token != set ]]; then
+    entire_source=none
+  fi
+  # Messages from the pinned helper (v0.11.5).
+  case $message in
+    *'no auth context'*) kind=missing ;;
+    *ENTIRE_TOKEN*|*'authentication failed'*|*'HTTP 401'*|*'HTTP 403'*) kind=rejected ;;
+    *) kind=other ;;
+  esac
+  # shellcheck source=lib/guidance.bash
+  source "${BASH_SOURCE[0]%/*}/../lib/guidance.bash"
+  entire_guidance "$kind" >&2
+fi
+rm -f -- "$errors"
+exit "$status"

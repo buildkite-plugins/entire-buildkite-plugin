@@ -12,7 +12,7 @@ Run from the repository root:
 
 ```sh
 git fetch --tags origin
-shellcheck hooks/*
+shellcheck -x hooks/* bin/* lib/*
 python3 -B -m unittest discover -s tests -v
 docker run --rm -v "$PWD:/plugin:ro" buildkite/plugin-linter --id entire --readme CONTRIBUTING.md
 ```

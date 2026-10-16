@@ -55,12 +55,12 @@ class PluginTest(unittest.TestCase):
         self.installed = self.home / ".local/bin/git-remote-entire"
         # Do not pick up a host helper, Git configuration, or credentials.
         for name in ("bash", "git", "python3", "sort", "mkdir", "cp", "uname", "mktemp", "sed", "cat",
-                     "sha256sum", "tar", "gzip", "rm", "mv"):
+                     "sha256sum", "tar", "gzip", "rm", "mv", "head", "tee"):
             (self.bin / name).symlink_to(shutil.which(name))
         (self.bin / "buildkite-agent").symlink_to(self.agent)
         self.env = {"HOME": str(self.home), "PATH": str(self.bin),
                     "GIT_CONFIG_NOSYSTEM": "1", "TEST_ARCHIVE": str(self.archive),
-                    "BUILDKITE_REPO": URL, "GIT_TERMINAL_PROMPT": "0"}
+                    "BUILDKITE_REPO": URL, "GIT_TERMINAL_PROMPT": "0", "TMPDIR": str(self.home)}
         self.script(self.bin / "curl", '''#!/bin/bash
 echo download >> "$HOME/downloads"
 cp "$TEST_ARCHIVE" "${@: -1}"
@@ -91,6 +91,75 @@ cp "$TEST_ARCHIVE" "${@: -1}"
         self.env.update(BUILDKITE_AGENT_ENDPOINT=f"http://127.0.0.1:{server.server_port}/v3",
                         BUILDKITE_AGENT_ACCESS_TOKEN="test-agent-session", BUILDKITE_JOB_ID="job-123",
                         BUILDKITE_COMPUTE_TYPE="hosted")
+
+    def jwt(self, claims):
+        # Synthetic JWT: the client reads claims; the fixture checks the bearer,
+        # not its signature. Live Entire owns token signature/scope validation.
+        return ".".join(base64.urlsafe_b64encode(json.dumps(value).encode()).rstrip(b"=").decode()
+                        for value in ({"alg": "HS256"}, claims)) + ".c2lnbmF0dXJl"
+
+    def saved_jwt(self, origin, handle="fixture-user"):
+        return self.jwt({"iss": origin, "handle": handle, "exp": 4102444800})
+
+    def entire_fixture(self):
+        """Serve one Entire repository that accepts only bearers in self.accepted."""
+        cert, key = self.home / "cert.pem", self.home / "key.pem"
+        subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+                        "-keyout", str(key), "-out", str(cert), "-days", "1",
+                        "-subj", "/CN=127.0.0.1", "-addext", "subjectAltName=IP:127.0.0.1"],
+                       check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.git_requests, self.user_agents, self.accepted = [], [], set()
+        owner = self
+        oid = b"1" * 40
+        lines = [b"# service=git-upload-pack\n", None,
+                 oid + b" HEAD\0symref=HEAD:refs/heads/main object-format=sha1\n",
+                 oid + b" refs/heads/main\n", None]
+        advertisement = b"".join(b"0000" if line is None else f"{len(line) + 4:04x}".encode() + line
+                                 for line in lines)
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                owner.user_agents.append(self.headers.get("User-Agent"))
+                if self.path == "/.well-known/entire-cluster.json":
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(json.dumps({"core_urls": [origin]}).encode())
+                    return
+                owner.git_requests.append((self.path, self.headers.get("Authorization")))
+                allowed = (self.path == "/et/project/repository/info/refs?service=git-upload-pack"
+                           and self.headers.get("Authorization") in {f"Bearer {t}" for t in owner.accepted})
+                self.send_response(200 if allowed else 403)
+                self.send_header("Content-Type", "application/x-git-upload-pack-advertisement")
+                self.end_headers()
+                self.wfile.write(advertisement if allowed else b"denied")
+
+            def log_message(self, *_):
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(cert, key)
+        server.socket = context.wrap_socket(server.socket, server_side=True)
+        origin = f"https://127.0.0.1:{server.server_port}"
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        self.env.update(BUILDKITE_REPO=origin.replace("https://", "entire://") + "/et/project/repository",
+                        SSL_CERT_FILE=str(cert))
+        return origin
+
+    def saved_login(self, origin, saved_token):
+        config = self.home / "entire-config"
+        config.mkdir(exist_ok=True)
+        (config / "contexts.json").write_text(json.dumps({
+            "current_context": "fixture", "contexts": [{"name": "fixture", "core_url": origin,
+            "handle": "fixture-user", "keychain_service": f"entire-core:{origin}"}]}))
+        store = self.home / "tokens.json"
+        store.write_text(json.dumps({f"entire-core:{origin}": {"fixture-user": saved_token + "|4102444800"},
+                                    f"entire-core:{origin}:refresh": {"fixture-user": "fixture-refresh"}}))
+        self.env.update(ENTIRE_CONFIG_DIR=str(config), ENTIRE_TOKEN_STORE="file",
+                        ENTIRE_TOKEN_STORE_PATH=str(store), XDG_CACHE_HOME=str(self.home / "cache"))
 
     def script(self, path, source):
         path.write_text(source)
@@ -193,26 +262,136 @@ case $- in *x*) echo tracing=on ;; *) echo tracing=off ;; esac
             if path.is_file() and not path.is_symlink():
                 self.assertFalse(token.encode() in path.read_bytes(), "Token persisted to a file")
 
-    def test_credential_errors_continue_without_token_or_leaks(self):
+    def test_credential_errors_are_shown_without_token_and_continue(self):
         self.credential_api()
         secret = secrets.token_hex(20)
         self.env.update(ENTIRE_TOKEN="", ENTIRE_GIT_NO_LOGIN_FALLBACK="false")
+        refused = "Can't issue repository access token: "
+        # The agent rejects some unusable tokens itself; the hook rejects the rest.
+        cases = [(200, "", "", "contained an empty token", None),
+                 (200, secret + "\npassword=second", "", "contained invalid characters", None)]
+        cases += [(200, value, "", "Entire:", None) for value in (" \t", secret + " invalid")]
+        cases += [
+            (403, secret, "Forbidden", "403 Forbidden: Forbidden", "unknown"),
+            (400, secret, refused + "Entire code access requires a connected repository", "Entire code access requires", "opt-in"),
+            (400, secret, "Repository provider refused to issue token", "Repository provider refused", "provider"),
+            (400, secret, refused + "Requested repository does not match", "does not match", "repository"),
+            # Only Buildkite's own 400 reason classifies; quoted text elsewhere does not.
+            (400, secret, "Bad gateway: Repository provider refused to issue token", "Bad gateway", "unknown"),
+            # The agent prints the server message; redact the agent's own token if it appears.
+            (400, secret, "echo test-agent-session", "echo [REDACTED]", "unknown"),
+        ]
         for compute in ("hosted", "self-hosted"):
             self.env["BUILDKITE_COMPUTE_TYPE"] = compute
-            for status, token in ((200, ""), (200, " \t"), (200, secret + " invalid"),
-                                  (200, secret + "\npassword=second"), (403, secret)):
-                with self.subTest(compute=compute, status=status, empty=not token):
+            for status, token, message, shown, reason in cases:
+                with self.subTest(compute=compute, status=status, message=message[-24:], token=token[-12:]):
                     self.response_status = status
-                    self.response = {"token": token, "message": secret}
+                    self.response = {"token": token, "message": message}
                     result = self.hook('''
 [[ -z ${ENTIRE_TOKEN+x} ]]
 [[ $ENTIRE_GIT_NO_LOGIN_FALLBACK == false ]]
 case $- in *x*) echo continued ;; *) exit 1 ;; esac
+cat "$ENTIRE_BUILDKITE_PLUGIN_STATE/credentials"
 ''', trace=True)
-                    self.assertEqual(result.returncode, 0)
+                    self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertIn("continued", result.stdout)
+                    self.assertIn("+++ :warning: Entire: Buildkite did not issue checkout credentials\n", result.stderr)
+                    self.assertIn(shown, result.stderr)
+                    self.assertIn("Continuing without ENTIRE_TOKEN", result.stderr)
+                    self.assertNotIn("Authentication will proceed", result.stderr)
+                    self.assertNotIn("test-agent-session", result.stderr)
+                    self.assertIn(f"source=none\nreason={reason or 'unknown'}\n", result.stdout)
                     self.assertFalse(secret in result.stdout + result.stderr, "Credential leaked to output")
-        self.assertEqual(len(self.requests), 10)
+        self.assertEqual(len(self.requests), 2 * len(cases))
+
+    def test_failed_checkout_explains_the_credentials_it_had(self):
+        self.credential_api()
+        origin = self.entire_fixture()
+        good, bad = self.jwt({"aud": origin}), self.jwt({"aud": origin, "jti": "rejected"})
+        self.accepted.add(good)
+        refused = "Can't issue repository access token: "
+        opt_in = refused + "Entire code access requires a connected repository and a command job on hosted agents or with self-hosted code access enabled"
+        provider = "Repository provider refused to issue token"
+        twice = 'for i in 1 2; do git -c protocol.version=0 ls-remote "$BUILDKITE_REPO" || status=$?; done; exit "${status:-0}"'
+        link = "https://buildkite.com/organizations/{}/repository-providers"
+        # name, compute, supplied token, (status, issued token or reason), saved login, extra env, command,
+        # expected exit, expected output, unexpected output
+        cases = [
+            ("supplied token works", "self-hosted", good, None, None, {}, twice, 0,
+             ["Using ENTIRE_TOKEN from the agent environment"], ["+++ :warning:"]),
+            ("supplied token rejected", "self-hosted", bad, None, None, {}, twice, 128,
+             ["Entire rejected the supplied ENTIRE_TOKEN", link.format("acme-inc")], ["did not issue"]),
+            ("issued token works", "hosted", None, (200, good), None, {}, twice, 0,
+             ["Using checkout credentials issued by Buildkite"], ["+++ :warning:"]),
+            ("issued token rejected", "hosted", None, (200, bad), None, {}, twice, 128,
+             ["Entire rejected the credentials Buildkite issued"], ["self-hosted"]),
+            ("self-hosted setting off", "self-hosted", None, (400, opt_in), None, {}, twice, 128,
+             [opt_in, "Checkout had no Entire credentials", "is off for this pipeline", link.format("acme-inc"),
+              "entire login"], ["could not get a token"]),
+            ("Entire refused", "self-hosted", None, (400, provider), None, {}, twice, 128,
+             [provider, "could not get a token for this repository from Entire",
+              "The self-hosted setting is not the cause"], ["is off for this pipeline"]),
+            ("repository mismatch", "self-hosted", None, (400, refused + "Requested repository does not match"),
+             None, {}, twice, 128, ["BUILDKITE_REPO does not match this pipeline's Entire repository"], []),
+            ("unknown refusal on hosted", "hosted", None, (403, "Forbidden"), None, {}, twice, 128,
+             ["Checkout had no Entire credentials", "contact Buildkite support"], ["self-hosted agents, check"]),
+            ("unknown refusal on self-hosted", "self-hosted", None, (403, "Forbidden"), None,
+             {"BUILDKITE_ORGANIZATION_SLUG": "../evil"}, twice, 128, [link.format("~")], ["evil"]),
+            ("saved login works", "self-hosted", None, (400, provider), "good", {}, twice, 0,
+             ["Buildkite did not issue checkout credentials", "Continuing without ENTIRE_TOKEN"],
+             ["+++ :warning: Entire: Checkout", "rejected"]),
+            ("saved login rejected", "self-hosted", None, (400, provider), "bad", {}, twice, 128,
+             ["Entire rejected this agent's saved login", "could not get a token"], []),
+            ("login fallback disabled", "self-hosted", None, (400, opt_in), "good",
+             {"ENTIRE_GIT_NO_LOGIN_FALLBACK": "true"}, twice, 1,
+             ["saved-login fallback is disabled", "is off for this pipeline", link.format("acme-inc")], ["rejected"]),
+            ("token set during the job", "self-hosted", None, (400, provider), None, {},
+             f"export ENTIRE_TOKEN={bad}; " + twice, 128, ["Entire rejected the ENTIRE_TOKEN set during this job"], []),
+            ("not an authentication failure", "hosted", None, (200, good), None, {},
+             "export SSL_CERT_FILE=/nonexistent; " + twice, 128,
+             ["does not look like an authentication failure"], ["+++ :warning:"]),
+        ]
+        base = dict(self.env)
+        for name, compute, supplied, issued, login, extra, command, code, expected, unexpected in cases:
+            with self.subTest(name):
+                self.env = {**base, "BUILDKITE_COMPUTE_TYPE": compute, "BUILDKITE_ORGANIZATION_SLUG": "acme-inc",
+                            **extra}
+                if supplied is not None:
+                    self.env["ENTIRE_TOKEN"] = supplied
+                if issued is not None:
+                    self.response_status = issued[0]
+                    self.response = ({"token": issued[1], "username": "x-access-token"} if issued[0] == 200
+                                     else {"message": issued[1]})
+                if login is not None:
+                    saved = self.saved_jwt(origin)
+                    self.saved_login(origin, saved)
+                    (self.accepted.add if login == "good" else self.accepted.discard)(saved)
+                self.requests.clear()
+                self.git_requests.clear()
+                result = self.hook(command)
+                output = result.stdout + result.stderr
+                self.assertEqual(result.returncode, code, output)
+                for text in expected:
+                    self.assertIn(text, output)
+                for text in unexpected:
+                    self.assertNotIn(text, output)
+                # Guidance once per job, however often Git retries.
+                self.assertLessEqual(output.count("+++ :warning: Entire: "), 2)
+                self.assertLessEqual(output.count("does not look like"), 1)
+                self.assertEqual(len(self.requests), 0 if supplied else 1)
+                if code == 1:
+                    self.assertEqual(self.git_requests, [])
+                for secret in (good, bad, self.saved_jwt(origin)):
+                    self.assertNotIn(secret, output, "Credential leaked to output")
+
+    def test_pre_exit_removes_job_state(self):
+        result = subprocess.run(["bash", "-c", 'source "$1/hooks/environment"; echo "$ENTIRE_BUILDKITE_PLUGIN_STATE"; '
+                                 '"$1/hooks/pre-exit"', "test", str(ROOT)],
+                                env=self.env, cwd=self.home, text=True, capture_output=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        state = Path(result.stdout.splitlines()[-1])
+        self.assertTrue(str(state).startswith(str(self.home)))
+        self.assertFalse(state.exists())
 
     def test_missing_credential_helper_does_not_mask_later_failures(self):
         (self.bin / "buildkite-agent").unlink()
@@ -222,58 +401,12 @@ case $- in *x*) echo continued ;; *) exit 1 ;; esac
 
     def test_pinned_helper_uses_environment_bearer_and_server_repository_authorization(self):
         self.credential_api()
-        cert, key = self.home / "cert.pem", self.home / "key.pem"
-        subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
-                        "-keyout", str(key), "-out", str(cert), "-days", "1",
-                        "-subj", "/CN=127.0.0.1", "-addext", "subjectAltName=IP:127.0.0.1"],
-                       check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        git_requests = []
-        user_agents = []
-        oid = b"1" * 40
-        lines = [b"# service=git-upload-pack\n", None,
-                 oid + b" HEAD\0symref=HEAD:refs/heads/main object-format=sha1\n",
-                 oid + b" refs/heads/main\n", None]
-        advertisement = b"".join(b"0000" if line is None else f"{len(line) + 4:04x}".encode() + line
-                                 for line in lines)
-
-        class Handler(http.server.BaseHTTPRequestHandler):
-            def do_GET(self):
-                user_agents.append(self.headers.get("User-Agent"))
-                if self.path == "/.well-known/entire-cluster.json":
-                    self.send_response(200)
-                    self.send_header("Content-Type", "application/json")
-                    self.end_headers()
-                    self.wfile.write(json.dumps({"core_urls": [origin]}).encode())
-                    return
-                git_requests.append((self.path, self.headers.get("Authorization")))
-                allowed = (self.path == "/et/project/repository/info/refs?service=git-upload-pack"
-                           and self.headers.get("Authorization") in {f"Bearer {token}", f"Bearer {saved_token}"})
-                self.send_response(200 if allowed else 403)
-                self.send_header("Content-Type", "application/x-git-upload-pack-advertisement")
-                self.end_headers()
-                self.wfile.write(advertisement if allowed else b"denied")
-
-            def log_message(self, *_):
-                pass
-
-        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        context.load_cert_chain(cert, key)
-        server.socket = context.wrap_socket(server.socket, server_side=True)
-        origin = f"https://127.0.0.1:{server.server_port}"
-        # Synthetic JWT: the client reads aud; this fixture checks the bearer,
-        # not its signature. Live Entire owns token signature/scope validation.
-        token = ".".join(base64.urlsafe_b64encode(json.dumps(value).encode()).rstrip(b"=").decode()
-                         for value in ({"alg": "HS256"}, {"aud": origin})) + ".c2lnbmF0dXJl"
-        saved_token = ".".join(base64.urlsafe_b64encode(json.dumps(value).encode()).rstrip(b"=").decode()
-                               for value in ({"alg": "HS256"}, {"iss": origin, "handle": "fixture-user",
-                                                                       "exp": 4102444800})) + ".c2lnbmF0dXJl"
-        threading.Thread(target=server.serve_forever, daemon=True).start()
-        self.addCleanup(server.server_close)
-        self.addCleanup(server.shutdown)
+        origin = self.entire_fixture()
+        token, saved_token = self.jwt({"aud": origin}), self.saved_jwt(origin)
+        self.accepted.update({token, saved_token})
+        git_requests, user_agents = self.git_requests, self.user_agents
         self.response["token"] = token
-        self.env.update(BUILDKITE_REPO=origin.replace("https://", "entire://") + "/et/project/repository",
-                        SSL_CERT_FILE=str(cert), GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="credential.helper",
+        self.env.update(GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="credential.helper",
                         GIT_CONFIG_VALUE_0='!echo used > "$HOME/git-used"; echo quit=true')
         for user_agent, expected in ((None, f"git-remote-entire/{VERSION}"),
                                      ("buildkite-agent/4.3.0 stable-pin-test", "buildkite-agent/4.3.0 stable-pin-test"),
@@ -302,17 +435,8 @@ if git -c protocol.version=0 ls-remote "${BUILDKITE_REPO%/*}/other"; then exit 1
                 self.assertEqual(set(user_agents), {expected})
 
         # A usable saved identity must not bypass an explicit login opt-out.
-        config = self.home / "entire-config"
-        config.mkdir()
-        (config / "contexts.json").write_text(json.dumps({
-            "current_context": "fixture", "contexts": [{"name": "fixture", "core_url": origin,
-            "handle": "fixture-user", "keychain_service": f"entire-core:{origin}"}]}))
-        store = self.home / "tokens.json"
-        store.write_text(json.dumps({f"entire-core:{origin}": {"fixture-user": saved_token + "|4102444800"},
-                                    f"entire-core:{origin}:refresh": {"fixture-user": "fixture-refresh"}}))
-        self.env.update(BUILDKITE_COMPUTE_TYPE="self-hosted", ENTIRE_CONFIG_DIR=str(config),
-                        ENTIRE_TOKEN_STORE="file", ENTIRE_TOKEN_STORE_PATH=str(store),
-                        XDG_CACHE_HOME=str(self.home / "cache"))
+        self.saved_login(origin, saved_token)
+        self.env["BUILDKITE_COMPUTE_TYPE"] = "self-hosted"
         self.env.pop("GIT_HTTP_USER_AGENT", None)
         # Issuance is unavailable; the existing login policy still applies.
         self.response_status = 403

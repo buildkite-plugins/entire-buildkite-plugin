@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Remove the per-job state that hooks/environment created; it holds no token.
+state=${ENTIRE_BUILDKITE_PLUGIN_STATE:-}
+if [[ $state == "${TMPDIR:-/tmp}"/entire-buildkite-plugin.* && -d $state ]]; then
+  rm -rf -- "$state"
+fi

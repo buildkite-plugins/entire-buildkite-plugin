@@ -15,7 +15,7 @@ Installs or upgrades the Git remote helper when needed and reuses it across jobs
 There are no plugin options.
 
 The plugin preserves a non-empty `ENTIRE_TOKEN`. Otherwise, it tries Buildkite's
-Entire checkout integration on any agent type using Agent 4.3.0 or later.
+Entire checkout integration on any agent type.
 If credentials are available, it sets `ENTIRE_TOKEN` for the job; no Entire login
 is needed. If acquisition fails or returns unusable credentials, the plugin
 continues without a token, leaving saved-login and fallback settings unchanged.

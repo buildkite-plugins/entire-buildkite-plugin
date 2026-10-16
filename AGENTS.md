@@ -18,7 +18,7 @@
   fetched token to a file, or export it through another variable. Disable shell
   tracing before checking an existing token and throughout acquisition/export;
   suppress untrusted agent diagnostics.
-- Acquisition calls Agent 4.3.0's internal `git-credentials-helper get` directly
+- Acquisition calls the agent's internal `git-credentials-helper get` directly
   with the selected repository's exact HTTPS alias, which the issuer authorizes.
   It is not installed as a Git credential helper. Failed acquisition or empty/
   invalid credentials continue without a token, subject to the login opt-out

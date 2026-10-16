@@ -37,8 +37,8 @@ if (( status != 0 )) && mkdir "$state/explained" 2>/dev/null; then
   fi
   # Messages from the pinned helper (v0.11.5).
   case $message in
-    *'no auth context'*) kind=missing ;;
-    *ENTIRE_TOKEN*|*'authentication failed'*|*'HTTP 401'*|*'HTTP 403'*) kind=rejected ;;
+    *'no auth context'*|*'no usable login'*|*'no logins are saved'*) kind=missing ;;
+    *ENTIRE_TOKEN*|*'authentication failed'*|*'HTTP 401'*|*'HTTP 403'*|*'login session'*'expired'*) kind=rejected ;;
     *) kind=other ;;
   esac
   # shellcheck source=lib/guidance.bash

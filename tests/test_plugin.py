@@ -342,6 +342,8 @@ cat "$ENTIRE_BUILDKITE_PLUGIN_STATE/credentials"
              ["+++ :warning: Entire: Checkout", "rejected"]),
             ("saved login rejected", "self-hosted", None, (400, provider), "bad", {}, twice, 128,
              ["Entire rejected this agent's saved login", "could not get a token"], []),
+            ("saved login without a stored token", "self-hosted", None, (400, provider), "no-token", {}, twice, 128,
+             ["Checkout had no Entire credentials", "no usable saved Entire login"], ["The Entire helper failed"]),
             ("login fallback disabled", "self-hosted", None, (400, opt_in), "good",
              {"ENTIRE_GIT_NO_LOGIN_FALLBACK": "true"}, twice, 1,
              ["saved-login fallback is disabled", "is off for this pipeline", link.format("acme-inc")], ["rejected"]),
@@ -349,7 +351,7 @@ cat "$ENTIRE_BUILDKITE_PLUGIN_STATE/credentials"
              f"export ENTIRE_TOKEN={bad}; " + twice, 128, ["Entire rejected the ENTIRE_TOKEN set during this job"], []),
             ("not an authentication failure", "hosted", None, (200, good), None, {},
              "export SSL_CERT_FILE=/nonexistent; " + twice, 128,
-             ["does not look like an authentication failure"], ["+++ :warning:"]),
+             ["The Entire helper failed (see its error above)."], ["+++ :warning:"]),
         ]
         base = dict(self.env)
         for name, compute, supplied, issued, login, extra, command, code, expected, unexpected in cases:
@@ -366,6 +368,8 @@ cat "$ENTIRE_BUILDKITE_PLUGIN_STATE/credentials"
                     saved = self.saved_jwt(origin)
                     self.saved_login(origin, saved)
                     (self.accepted.add if login == "good" else self.accepted.discard)(saved)
+                    if login == "no-token":
+                        (self.home / "tokens.json").write_text("{}")
                 self.requests.clear()
                 self.git_requests.clear()
                 result = self.hook(command)
@@ -377,7 +381,7 @@ cat "$ENTIRE_BUILDKITE_PLUGIN_STATE/credentials"
                     self.assertNotIn(text, output)
                 # Guidance once per job, however often Git retries.
                 self.assertLessEqual(output.count("+++ :warning: Entire: "), 2)
-                self.assertLessEqual(output.count("does not look like"), 1)
+                self.assertLessEqual(output.count("The Entire helper failed"), 1)
                 self.assertEqual(len(self.requests), 0 if supplied else 1)
                 if code == 1:
                     self.assertEqual(self.git_requests, [])

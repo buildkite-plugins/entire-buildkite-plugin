@@ -49,7 +49,7 @@ entire_guidance() {
       echo 'Entire:   - Or export ENTIRE_TOKEN in an agent environment hook.' ;;
     missing:*)
       echo '+++ :warning: Entire: Checkout had no Entire credentials'
-      echo 'Entire: No ENTIRE_TOKEN was set and this agent has no saved Entire login.'
+      echo 'Entire: No ENTIRE_TOKEN was set and this agent has no usable saved Entire login.'
       entire_reason_guidance
       echo 'Entire:   - Or export ENTIRE_TOKEN in an agent environment hook, or run `entire login` on the agent.' ;;
     rejected:supplied)
@@ -69,6 +69,6 @@ entire_guidance() {
       echo 'Entire:   - Run `entire login` on the agent again.'
       entire_reason_guidance ;;
     other:*)
-      echo 'Entire: The Entire helper failed (see its error above). This does not look like an authentication failure.' ;;
+      echo 'Entire: The Entire helper failed (see its error above).' ;;
   esac
 }

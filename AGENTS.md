@@ -25,10 +25,7 @@
   below. Do not change Git credentials, saved login, or fallback policy on any
   agent type. Repository validation and helper installation failures still
   fail the hook. Self-hosted issuance is provider opt-in in Buildkite; no plugin
-  setting is needed. When acquisition leaves `ENTIRE_TOKEN` unset, print the
-  opt-in guidance and the repository providers link, using a validated
-  `BUILDKITE_ORGANIZATION_SLUG` or `~`; the job cannot know the provider ID.
-  Print it only then, never with credential diagnostics.
+  setting is needed.
 - v0.11.5 removed Git credential lookup and `ENTIRE_GIT_NO_LOGIN_FALLBACK`.
   When `ENTIRE_TOKEN` remains unset after acquisition, the hook must fail closed
   for an explicit login opt-out or invalid boolean, matching `strconv.ParseBool`

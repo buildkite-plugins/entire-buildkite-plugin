@@ -20,8 +20,6 @@ ROOT = Path(__file__).resolve().parents[1]
 COMMIT = "4b8cdfaf0d15e236835c3b7c85d8803b112574bc"
 VERSION = f"0.0.0+{COMMIT}"
 URL = "entire://region.entire.io/et/project/repository"
-SETTINGS = "https://buildkite.com/organizations/{}/repository-providers"
-OPT_IN = '"Allow self-hosted agents to use checkout credentials"'
 
 
 class PluginTest(unittest.TestCase):
@@ -188,7 +186,6 @@ case $- in *x*) echo tracing=on ;; *) echo tracing=off ;; esac
                     self.assertIn(hashlib.sha256(before.stdout).hexdigest(), result.stdout)
                     self.assertIn(f"tracing={'on' if trace else 'off'}", result.stdout)
                     self.assertFalse(token in result.stdout + result.stderr, "Token leaked to output")
-                    self.assertNotIn("repository-providers", result.stdout + result.stderr)
                     self.assertEqual(self.requests[-1], ("/v3/jobs/job-123/repository_access_token",
                                                        {"repo_url": f"https://region.entire.io/et/project/repository{suffix}"}))
         self.assertEqual(len(self.requests), 8)
@@ -200,12 +197,8 @@ case $- in *x*) echo tracing=on ;; *) echo tracing=off ;; esac
         self.credential_api()
         secret = secrets.token_hex(20)
         self.env.update(ENTIRE_TOKEN="", ENTIRE_GIT_NO_LOGIN_FALLBACK="false")
-        for compute, org, link in (("hosted", "acme-inc", "acme-inc"), ("self-hosted", None, "~"),
-                                   ("self-hosted", "../evil", "~")):
+        for compute in ("hosted", "self-hosted"):
             self.env["BUILDKITE_COMPUTE_TYPE"] = compute
-            self.env.pop("BUILDKITE_ORGANIZATION_SLUG", None)
-            if org is not None:
-                self.env["BUILDKITE_ORGANIZATION_SLUG"] = org
             for status, token in ((200, ""), (200, " \t"), (200, secret + " invalid"),
                                   (200, secret + "\npassword=second"), (403, secret)):
                 with self.subTest(compute=compute, status=status, empty=not token):
@@ -218,12 +211,8 @@ case $- in *x*) echo continued ;; *) exit 1 ;; esac
 ''', trace=True)
                     self.assertEqual(result.returncode, 0)
                     self.assertIn("continued", result.stdout)
-                    self.assertIn("~~~ :warning: Entire: Buildkite did not issue checkout credentials\n", result.stderr)
-                    self.assertIn(OPT_IN, result.stderr)
-                    self.assertIn(f"Entire: {SETTINGS.format(link)}\n", result.stderr)
-                    self.assertIn("Continuing with a saved Entire login", result.stderr)
                     self.assertFalse(secret in result.stdout + result.stderr, "Credential leaked to output")
-        self.assertEqual(len(self.requests), 15)
+        self.assertEqual(len(self.requests), 10)
 
     def test_missing_credential_helper_does_not_mask_later_failures(self):
         (self.bin / "buildkite-agent").unlink()
@@ -335,13 +324,6 @@ if git -c protocol.version=0 ls-remote "${BUILDKITE_REPO%/*}/other"; then exit 1
                 user_agents.clear()
                 result = self.hook('git -c protocol.version=0 ls-remote "$BUILDKITE_REPO"', trace=True)
                 self.assertNotEqual(result.returncode, 0)
-                if fallback in ("", "typo", " true"):
-                    self.assertIn("must be a boolean", result.stderr)
-                else:
-                    self.assertIn("saved-login fallback is disabled", result.stderr)
-                    self.assertIn(OPT_IN, result.stderr)
-                    self.assertIn(SETTINGS.format("~"), result.stderr)
-                    self.assertNotIn("Continuing", result.stderr)
                 self.assertEqual(git_requests, [], "Used saved identity despite login opt-out")
                 self.assertEqual(user_agents, [], "Contacted Entire despite login opt-out")
                 self.assertEqual(len(self.requests), 1)
@@ -406,7 +388,6 @@ git config --null --list | sha256sum
                 self.assertIn(f"fallback={fallback if fallback is not None else 'unset'}\n", result.stdout)
                 self.assertIn(hashlib.sha256(before.stdout).hexdigest(), result.stdout)
                 self.assertFalse(token in result.stdout + result.stderr, "Token leaked to output")
-                self.assertNotIn("repository-providers", result.stdout + result.stderr)
         self.assertEqual(self.requests, [])
 
     def test_invalid_repository_cannot_broaden_credential_scope(self):

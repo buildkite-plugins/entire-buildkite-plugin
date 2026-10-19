@@ -16,12 +16,8 @@
   Otherwise, attempt selected-repository token acquisition once on every agent
   type and export a usable result as `ENTIRE_TOKEN`. Never log or write the
   fetched token to a file, or export it through another variable. Disable shell
-  tracing before checking an existing token and throughout acquisition/export.
-  Capture the agent's stdout (the password) and stderr separately. Never print
-  stdout. Print stderr, which is the agent's log line with Buildkite's reason,
-  as a non-blocking warning: strip control characters, bound it to 4 KiB and
-  10 lines, and redact the agent access token and any candidate password. The
-  agent does not write credentials to stderr; the redaction is a backstop.
+  tracing before checking an existing token and throughout acquisition/export;
+  suppress untrusted agent diagnostics.
 - Acquisition calls the agent's internal `git-credentials-helper get` directly
   with the selected repository's exact HTTPS alias, which the issuer authorizes.
   It is not installed as a Git credential helper. Failed acquisition or empty/
@@ -30,17 +26,6 @@
   agent type. Repository validation and helper installation failures still
   fail the hook. Self-hosted issuance is provider opt-in in Buildkite; no plugin
   setting is needed.
-- `bin/git-remote-entire` wraps the real helper for the job; the environment
-  hook prepends `bin` to `PATH` and records the real helper and the credential
-  source and Buildkite reason (never a token) in a temporary state directory
-  that `hooks/pre-exit` removes. The wrapper passes stdin/stdout through and
-  copies stderr. On the first failure it classifies the helper's error (no
-  auth context, rejected token or login, other) and prints guidance from
-  `lib/guidance.bash` for that case and source. Guidance names the provider
-  setting only when Buildkite's reason or an unknown reason on a self-hosted
-  agent calls for it. Never mention an agent version requirement: the agent
-  command and the backend have no version check. Link the repository providers
-  list with a validated `BUILDKITE_ORGANIZATION_SLUG` or `~`.
 - v0.11.5 removed Git credential lookup and `ENTIRE_GIT_NO_LOGIN_FALLBACK`.
   When `ENTIRE_TOKEN` remains unset after acquisition, the hook must fail closed
   for an explicit login opt-out or invalid boolean, matching `strconv.ParseBool`

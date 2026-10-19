@@ -54,80 +54,38 @@ if ! helper_is_current; then
   )
 fi
 
-# Wrap the helper for this job so a failed checkout explains its credentials.
-# The state directory never holds a token; hooks/pre-exit removes it.
-plugin=$(cd "${BASH_SOURCE[0]%/*}/.." && pwd)
-# shellcheck source=lib/guidance.bash
-source "$plugin/lib/guidance.bash"
-ENTIRE_BUILDKITE_PLUGIN_STATE=$(mktemp -d "${TMPDIR:-/tmp}/entire-buildkite-plugin.XXXXXXXX")
-export ENTIRE_BUILDKITE_PLUGIN_STATE
-command -v git-remote-entire > "$ENTIRE_BUILDKITE_PLUGIN_STATE/helper"
-export PATH="$plugin/bin:$PATH"
-
 # Preserve operator credentials; otherwise try Buildkite on any agent type.
 # Even testing an existing token must happen with tracing disabled.
 entire_trace=$-
 set +x
-entire_source=none
-entire_reason=
-if [[ -n ${ENTIRE_TOKEN:-} ]]; then
-  entire_source=supplied
-  echo 'Entire: Using ENTIRE_TOKEN from the agent environment; not requesting credentials from Buildkite.'
-else
+if [[ -z ${ENTIRE_TOKEN:-} ]]; then
   repository=${BUILDKITE_REPO#entire://}
-  errors="$ENTIRE_BUILDKITE_PLUGIN_STATE/agent-errors"
   # The agent exposes repository credentials through this internal command.
   # Call it once, not through Git. The issuer authorizes the exact HTTPS alias.
-  # Stdout holds the password and is never printed. Stderr holds the agent's
-  # log line with Buildkite's reason; it is shown below, bounded and redacted.
-  if command -v buildkite-agent >/dev/null; then
-    entire_output=$(printf 'protocol=https\nhost=%s\npath=%s\n\n' "${repository%%/*}" "${repository#*/}" \
-      | BUILDKITE_AGENT_NO_COLOR=true BUILDKITE_AGENT_DEBUG=false BUILDKITE_AGENT_LOG_LEVEL=notice \
-        buildkite-agent git-credentials-helper get 2>"$errors") && entire_status=0 || entire_status=$?
-  else
-    entire_output='' entire_status=127
-    echo 'buildkite-agent is not on PATH.' > "$errors"
-  fi
-  ENTIRE_TOKEN=$(printf '%s\n' "$entire_output" | sed -n 's/^password=//p')
-  if (( entire_status == 0 )) && [[ -n $ENTIRE_TOKEN && $ENTIRE_TOKEN != *[[:space:]]* ]]; then
+  # Suppress diagnostics: an error response could contain credential material.
+  if ENTIRE_TOKEN=$(printf 'protocol=https\nhost=%s\npath=%s\n\n' "${repository%%/*}" "${repository#*/}" \
+    | buildkite-agent git-credentials-helper get 2>/dev/null \
+    | sed -n 's/^password=//p') && [[ -n $ENTIRE_TOKEN && $ENTIRE_TOKEN != *[[:space:]]* ]]; then
     # Presence selects Entire's fixed-bearer path, with no login fallback.
     export ENTIRE_TOKEN
-    entire_source=issued
-    echo 'Entire: Using checkout credentials issued by Buildkite.'
   else
-    # Issuance is optional: a saved login or other agent setup may still work.
-    entire_message=$(head -c 4096 "$errors" | sed -e 's/\x1b\[[0-9;]*[A-Za-z]//g' -e 's/[[:cntrl:]]//g' \
-      -e 's/\. Authentication will proceed, but will fail\.$/./' | head -n 10)
-    # Defense in depth: the agent does not print credentials to stderr.
-    [[ ${#ENTIRE_TOKEN} -ge 8 ]] && entire_message=${entire_message//"$ENTIRE_TOKEN"/[REDACTED]}
-    [[ -n ${BUILDKITE_AGENT_ACCESS_TOKEN:-} ]] &&
-      entire_message=${entire_message//"$BUILDKITE_AGENT_ACCESS_TOKEN"/[REDACTED]}
+    # Issuance is optional. Leave saved-login and fallback policy untouched.
     unset ENTIRE_TOKEN
-    case $entire_message in
-      *"400 Bad Request: Can't issue repository access token: Entire code access requires"*) entire_reason=opt-in ;;
-      *'400 Bad Request: Repository provider refused to issue token'*) entire_reason=provider ;;
-      *"400 Bad Request: Can't issue repository access token: Requested repository does not match"*) entire_reason=repository ;;
-      *) entire_reason=unknown ;;
-    esac
+    organization=${BUILDKITE_ORGANIZATION_SLUG:-}
+    [[ $organization =~ ^[A-Za-z0-9][A-Za-z0-9-]*$ ]] || organization='~'
     {
-      echo '+++ :warning: Entire: Buildkite did not issue checkout credentials'
-      if (( entire_status == 0 )); then
-        echo 'Entire: buildkite-agent git-credentials-helper returned no usable token.'
-      else
-        echo "Entire: buildkite-agent git-credentials-helper failed (exit ${entire_status}):"
+      echo '+++ :warning: Entire: No checkout credentials from Buildkite'
+      echo 'Entire: If checkout fails, check the Entire repository connection and access permissions:'
+      echo "Entire: https://buildkite.com/organizations/${organization}/repository-providers"
+      if [[ ${BUILDKITE_COMPUTE_TYPE:-} != hosted ]]; then
+        echo 'Entire: For self-hosted agents, also check "Allow self-hosted agents to use checkout credentials".'
       fi
-      if [[ -n $entire_message ]]; then
-        while IFS= read -r line; do echo "Entire:   $line"; done <<< "$entire_message"
-      elif (( entire_status != 0 )); then
-        echo 'Entire:   (the agent gave no reason)'
-      fi
-      echo 'Entire: Continuing without ENTIRE_TOKEN. Checkout can still use a saved Entire login or other agent configuration.'
+      echo 'Entire: A supplied ENTIRE_TOKEN or a saved Entire login on the agent can also provide authentication.'
     } >&2
-    unset entire_message line
+    unset organization
   fi
-  unset repository errors entire_output entire_status
+  unset repository
 fi
-printf 'source=%s\nreason=%s\n' "$entire_source" "$entire_reason" > "$ENTIRE_BUILDKITE_PLUGIN_STATE/credentials"
 case $entire_trace in
   *x*) unset entire_trace; set -x ;;
   *) unset entire_trace ;;
@@ -138,10 +96,9 @@ esac
 if [[ ! ${ENTIRE_TOKEN+x} ]]; then
   case ${ENTIRE_GIT_NO_LOGIN_FALLBACK-false} in
     1|t|T|true|TRUE|True)
-      entire_guidance guard >&2
+      echo 'Entire: saved-login fallback is disabled; supply ENTIRE_TOKEN.' >&2
       exit 1 ;;
     0|f|F|false|FALSE|False) ;;
     *) echo 'Entire: ENTIRE_GIT_NO_LOGIN_FALLBACK must be a boolean (true or false).' >&2; exit 1 ;;
   esac
 fi
-unset plugin entire_source entire_reason

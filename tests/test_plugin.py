@@ -185,6 +185,7 @@ case $- in *x*) echo tracing=on ;; *) echo tracing=off ;; esac
                     self.assertIn(hashlib.sha256(token.encode()).hexdigest(), result.stdout)
                     self.assertIn(hashlib.sha256(before.stdout).hexdigest(), result.stdout)
                     self.assertIn(f"tracing={'on' if trace else 'off'}", result.stdout)
+                    self.assertNotIn("No checkout credentials", result.stderr)
                     self.assertFalse(token in result.stdout + result.stderr, "Token leaked to output")
                     self.assertEqual(self.requests[-1], ("/v3/jobs/job-123/repository_access_token",
                                                        {"repo_url": f"https://region.entire.io/et/project/repository{suffix}"}))
@@ -196,7 +197,8 @@ case $- in *x*) echo tracing=on ;; *) echo tracing=off ;; esac
     def test_credential_errors_continue_without_token_or_leaks(self):
         self.credential_api()
         secret = secrets.token_hex(20)
-        self.env.update(ENTIRE_TOKEN="", ENTIRE_GIT_NO_LOGIN_FALLBACK="false")
+        self.env.update(ENTIRE_TOKEN="", ENTIRE_GIT_NO_LOGIN_FALLBACK="false",
+                        BUILDKITE_ORGANIZATION_SLUG="acme-inc")
         for compute in ("hosted", "self-hosted"):
             self.env["BUILDKITE_COMPUTE_TYPE"] = compute
             for status, token in ((200, ""), (200, " \t"), (200, secret + " invalid"),
@@ -211,14 +213,22 @@ case $- in *x*) echo continued ;; *) exit 1 ;; esac
 ''', trace=True)
                     self.assertEqual(result.returncode, 0)
                     self.assertIn("continued", result.stdout)
+                    self.assertIn("No checkout credentials from Buildkite", result.stderr)
+                    self.assertIn("If checkout fails", result.stderr)
+                    self.assertIn("https://buildkite.com/organizations/acme-inc/repository-providers", result.stderr)
+                    self.assertEqual("Allow self-hosted agents" in result.stderr, compute == "self-hosted")
                     self.assertFalse(secret in result.stdout + result.stderr, "Credential leaked to output")
         self.assertEqual(len(self.requests), 10)
 
     def test_missing_credential_helper_does_not_mask_later_failures(self):
         (self.bin / "buildkite-agent").unlink()
-        result = self.hook('[[ -z ${ENTIRE_TOKEN+x} ]]; echo continued; exit 42', trace=True)
-        self.assertEqual(result.returncode, 42)
-        self.assertIn("continued", result.stdout)
+        for organization in ("", "../other"):
+            with self.subTest(organization=organization):
+                self.env["BUILDKITE_ORGANIZATION_SLUG"] = organization
+                result = self.hook('[[ -z ${ENTIRE_TOKEN+x} ]]; echo continued; exit 42', trace=True)
+                self.assertEqual(result.returncode, 42)
+                self.assertIn("continued", result.stdout)
+                self.assertIn("https://buildkite.com/organizations/~/repository-providers", result.stderr)
 
     def test_pinned_helper_uses_environment_bearer_and_server_repository_authorization(self):
         self.credential_api()
@@ -387,6 +397,7 @@ git config --null --list | sha256sum
                 self.assertIn(hashlib.sha256(token.encode()).hexdigest(), result.stdout)
                 self.assertIn(f"fallback={fallback if fallback is not None else 'unset'}\n", result.stdout)
                 self.assertIn(hashlib.sha256(before.stdout).hexdigest(), result.stdout)
+                self.assertNotIn("No checkout credentials", result.stderr)
                 self.assertFalse(token in result.stdout + result.stderr, "Token leaked to output")
         self.assertEqual(self.requests, [])
 

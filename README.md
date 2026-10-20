@@ -19,6 +19,8 @@ Entire checkout integration on any agent type.
 If credentials are available, it sets `ENTIRE_TOKEN` for the job; no Entire login
 is needed. If acquisition fails or returns unusable credentials, the plugin
 continues without a token, leaving saved-login and fallback settings unchanged.
+It prints guidance for checking the repository provider settings if checkout
+fails. It does not intercept checkout or diagnose the cause of a failure.
 
 Self-hosted token issuance requires provider opt-in in Buildkite, not a plugin
 option. You can also export your own `ENTIRE_TOKEN` in an

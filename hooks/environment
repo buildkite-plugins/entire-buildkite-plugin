@@ -71,6 +71,18 @@ if [[ -z ${ENTIRE_TOKEN:-} ]]; then
   else
     # Issuance is optional. Leave saved-login and fallback policy untouched.
     unset ENTIRE_TOKEN
+    organization=${BUILDKITE_ORGANIZATION_SLUG:-}
+    [[ $organization =~ ^[A-Za-z0-9][A-Za-z0-9-]*$ ]] || organization='~'
+    {
+      echo '+++ :warning: Entire: No checkout credentials from Buildkite'
+      echo 'Entire: If checkout fails, check the Entire repository connection and access permissions:'
+      echo "Entire: https://buildkite.com/organizations/${organization}/repository-providers"
+      if [[ ${BUILDKITE_COMPUTE_TYPE:-} != hosted ]]; then
+        echo 'Entire: For self-hosted agents, also check "Allow self-hosted agents to use checkout credentials".'
+      fi
+      echo 'Entire: A supplied ENTIRE_TOKEN or a saved Entire login on the agent can also provide authentication.'
+    } >&2
+    unset organization
   fi
   unset repository
 fi

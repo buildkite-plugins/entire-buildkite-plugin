@@ -31,12 +31,15 @@
   for an explicit login opt-out or invalid boolean, matching `strconv.ParseBool`
   semantics. An absent opt-out allows saved login. A present token takes
   precedence; the helper rejects an empty token without using saved login.
-- The pinned [v0.11.5 commit](https://github.com/entireio/cli/commit/4b8cdfaf0d15e236835c3b7c85d8803b112574bc)
+- The pinned [v0.11.6 commit](https://github.com/entireio/cli/commit/fedd31ca105b27e2bc57b60caa304aab82a39f25)
   is validated against the environment-token flow and `GIT_HTTP_USER_AGENT`.
   Commit artifacts report `0.0.0+<commit>`, not the release version. Update both
-  architecture checksums and the version tests together; unknown development
-  versions are replaced because commit hashes cannot establish version order.
-- The pinned helper [consumes `ENTIRE_TOKEN` as a fixed JWT bearer](https://github.com/entireio/cli/blob/4b8cdfaf0d15e236835c3b7c85d8803b112574bc/cmd/git-remote-entire/main.go#L364-L386),
+  architecture archive/executable checksums and the tests together. Both Linux
+  artifacts were inspected with `go version -m` and contain Go 1.27.3. Only exact
+  executable hashes are reused, without executing an unverified helper; reported
+  versions cannot establish the compiler used. Other builds (including newer or
+  custom builds) are replaced/shadowed. Unsupported platforms fail closed.
+- The pinned helper [consumes `ENTIRE_TOKEN` as a fixed JWT bearer](https://github.com/entireio/cli/blob/fedd31ca105b27e2bc57b60caa304aab82a39f25/cmd/git-remote-entire/main.go),
   bypassing Git credentials and saved login, with no token refresh. The bearer
   can be sent to other repositories in a trusted cluster. Entire's server must
   enforce repository scope; the plugin does not filter later requests.

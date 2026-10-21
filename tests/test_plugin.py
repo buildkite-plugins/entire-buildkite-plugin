@@ -17,7 +17,7 @@ import threading
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-COMMIT = "4b8cdfaf0d15e236835c3b7c85d8803b112574bc"
+COMMIT = "fedd31ca105b27e2bc57b60caa304aab82a39f25"
 VERSION = f"0.0.0+{COMMIT}"
 URL = "entire://region.entire.io/et/project/repository"
 
@@ -115,29 +115,32 @@ cp "$TEST_ARCHIVE" "${@: -1}"
         self.assertEqual((self.home / "downloads").read_text(), "download\n")
         self.assertFalse((self.home / ".gitconfig").exists())
 
-    def test_supported_versions_are_not_replaced_or_downgraded(self):
-        for version in (VERSION, "0.11.5", "0.11.10", "0.12.0", "1.0.0+build"):
-            with self.subTest(version=version):
-                self.script(self.bin / "git-remote-entire", f"#!/bin/sh\necho 'git-remote-entire {version}'\n")
-                result = self.hook()
-                self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertIn(version, result.stdout)
-                self.assertFalse(self.installed.exists())
-                self.assertFalse((self.home / "downloads").exists())
+    def test_verified_helper_on_path_is_reused(self):
+        helper = self.bin / "git-remote-entire"
+        with tarfile.open(self.archive) as tar:
+            helper.write_bytes(tar.extractfile("git-remote-entire").read())
+        helper.chmod(0o755)
+        result = self.hook()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(VERSION, result.stdout)
+        self.assertFalse(self.installed.exists())
+        self.assertFalse((self.home / "downloads").exists())
 
-    def test_old_and_unidentifiable_versions_are_replaced_even_ahead_on_path(self):
-        for version, status in (("0.11.4", 0), ("0.9.99", 0),
-                                ("0.11.5-nightly.202610120640.a564a68c8", 0),
-                                ("0.0.0+a564a68c802d50a0f4cff333da6ee13d59be027d", 0),
-                                ("0.0.0+57de2c37992efdbcc0519bda2376ccf93f3020c2", 0),
-                                ("unknown", 0), ("0.11.5", 1)):
-            with self.subTest(version=version, status=status):
-                self.installed.unlink(missing_ok=True)
-                self.script(self.bin / "git-remote-entire", f"#!/bin/sh\necho 'git-remote-entire {version}'\nexit {status}\n")
-                result = self.hook()
-                self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertIn(VERSION, result.stdout)
-                self.assertTrue(self.installed.is_file())
+    def test_unverified_helpers_are_replaced_regardless_of_reported_version(self):
+        for location in (self.bin / "git-remote-entire", self.installed):
+            location.parent.mkdir(parents=True, exist_ok=True)
+            for version in (VERSION, "0.11.4", "0.11.5", "0.11.6", "0.11.10",
+                            "0.12.0", "1.0.0+build", "0.11.5-nightly.202610120640.a564a68c8",
+                            "0.0.0+4b8cdfaf0d15e236835c3b7c85d8803b112574bc", "unknown"):
+                with self.subTest(location=location, version=version):
+                    self.installed.unlink(missing_ok=True)
+                    (self.bin / "git-remote-entire").unlink(missing_ok=True)
+                    self.script(location, f"#!/bin/sh\necho 'git-remote-entire {version}'\n: > \"$HOME/unverified-executed\"\n")
+                    result = self.hook()
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn(VERSION, result.stdout)
+                    self.assertTrue(self.installed.is_file())
+                    self.assertFalse((self.home / "unverified-executed").exists())
 
     def test_corrupt_download_preserves_existing_helper_and_cleans_staging(self):
         self.installed.parent.mkdir(parents=True)
@@ -146,7 +149,19 @@ cp "$TEST_ARCHIVE" "${@: -1}"
         self.script(self.bin / "curl", '#!/bin/bash\nprintf corrupt > "${@: -1}"\n')
         result = self.hook()
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("checksum mismatch", result.stderr)
+        self.assertIn("release checksum mismatch", result.stderr)
+        self.assertEqual(self.installed.read_text(), original)
+        self.assertEqual(list(self.installed.parent.iterdir()), [self.installed])
+
+    def test_bad_extraction_preserves_existing_helper_and_cleans_staging(self):
+        self.installed.parent.mkdir(parents=True)
+        original = "#!/bin/sh\necho 'git-remote-entire 0.11.5'\n"
+        self.script(self.installed, original)
+        (self.bin / "tar").unlink()
+        self.script(self.bin / "tar", '#!/bin/bash\nprintf corrupt > "$4/git-remote-entire"\n')
+        result = self.hook()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("executable checksum mismatch", result.stderr)
         self.assertEqual(self.installed.read_text(), original)
         self.assertEqual(list(self.installed.parent.iterdir()), [self.installed])
 
@@ -157,7 +172,7 @@ cp "$TEST_ARCHIVE" "${@: -1}"
                 self.script(self.bin / "uname", f'#!/bin/sh\nif [ "$1" = -s ]; then echo {system}; else echo {machine}; fi\n')
                 result = self.hook()
                 self.assertNotEqual(result.returncode, 0)
-                self.assertIn("automatic installation supports", result.stderr)
+                self.assertIn("supports Linux amd64 and arm64 only", result.stderr)
                 self.assertFalse((self.home / "downloads").exists())
 
     def test_token_is_exported_once_without_config_changes_or_leaks(self):

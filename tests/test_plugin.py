@@ -135,7 +135,7 @@ cp "$TEST_ARCHIVE" "${@: -1}"
                 with self.subTest(location=location, version=version):
                     self.installed.unlink(missing_ok=True)
                     (self.bin / "git-remote-entire").unlink(missing_ok=True)
-                    self.script(location, f"#!/bin/sh\necho 'git-remote-entire {version}'\ntouch \"$HOME/unverified-executed\"\n")
+                    self.script(location, f"#!/bin/sh\necho 'git-remote-entire {version}'\n: > \"$HOME/unverified-executed\"\n")
                     result = self.hook()
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertIn(VERSION, result.stdout)

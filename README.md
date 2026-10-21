@@ -11,8 +11,10 @@ steps:
     - entire
 ```
 
-Installs or upgrades the Git remote helper when needed and reuses it across jobs.
-There are no plugin options.
+Installs a checksum-verified Git remote helper built with Go 1.27.3 and reuses it
+across jobs. Other helpers on PATH or in the plugin's install location are replaced
+or shadowed, regardless of their reported version, so an older Go build cannot
+bypass the eMudhra CA compromise remediation. There are no plugin options.
 
 The plugin preserves a non-empty `ENTIRE_TOKEN`. Otherwise, it tries Buildkite's
 Entire checkout integration on any agent type.
@@ -26,8 +28,11 @@ Self-hosted token issuance requires provider opt-in in Buildkite, not a plugin
 option. You can also export your own `ENTIRE_TOKEN` in an
 [agent environment hook](https://buildkite.com/docs/agent/v3/hooks#job-lifecycle-hooks).
 We recommend [installing the Entire CLI](https://docs.entire.io/installation)
-for self-hosted agents, including `git-remote-entire` on `PATH`. The plugin does
-not change Git credentials or saved-login and fallback settings on any agent.
+for Linux self-hosted agents. The plugin requires Linux amd64 or arm64 and fails
+on other platforms, even if a helper is already installed. It uses its verified
+helper in preference to an unrecognized installation on `PATH`. Installations
+outside `~/.local/bin` are left unchanged; a helper at that location is replaced.
+It does not change Git credentials or saved-login and fallback settings on any agent.
 
 Entire v0.11.5 no longer reads Git credentials. If no token is available and
 `ENTIRE_GIT_NO_LOGIN_FALLBACK=true`, the plugin fails rather than use a saved
@@ -38,7 +43,7 @@ not refreshed and can expire during long jobs.
 
 ## Runtime requirements
 
-Automatic installation supports Linux amd64 and arm64, with Bash, curl, Git,
+The plugin supports Linux amd64 and arm64, with Bash, curl, Git,
 GNU coreutils, gzip, sed, and tar.
 
 ## License

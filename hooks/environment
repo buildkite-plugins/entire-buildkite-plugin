@@ -6,38 +6,33 @@ if [[ ! ${BUILDKITE_REPO:-} =~ ^entire://[a-zA-Z0-9.-]+(:[0-9]+)?/[^[:space:]?#]
   exit 1
 fi
 
-# v0.11.5 commit build validated against the environment-token flow.
-commit=4b8cdfaf0d15e236835c3b7c85d8803b112574bc
+# v0.11.6 commit artifacts verified as built with Go 1.27.3 (CVE-2026-111943).
+commit=fedd31ca105b27e2bc57b60caa304aab82a39f25
 export PATH="${HOME}/.local/bin:${PATH}"
 
+# Only reuse verified executables. A reported release version cannot establish
+# which Go compiler built a PATH/cache installation. No host Go is required.
+case "$(uname -s)/$(uname -m)" in
+  Linux/x86_64|Linux/amd64)
+    arch=amd64
+    checksum=dafe35ea12509661d878a28ff07ba7bc8e632c69e9ed40acf913aa5182042866
+    helper_checksum=df202c78779217cf06da8b6bb62d64a5e242b874bfa1618692e720689d598392 ;;
+  Linux/aarch64|Linux/arm64)
+    arch=arm64
+    checksum=3e63494fd4a7633aecdcb6ffab1270a9159f7a30aec311107a903b5dbef81f2a
+    helper_checksum=ca718fbd7430f7c9c8b0b7d5e5549ae6bd04ddc9b00259ccce59a47109ebaf4d ;;
+  *) echo 'Entire: verified helper installation supports Linux amd64 and arm64 only.' >&2; exit 1 ;;
+esac
+
 helper_is_current() {
-  local version
-  version="$(git-remote-entire --version 2>/dev/null)" || return 1
-  version="${version%%$'\n'*}"
-  case "$version" in
-    "git-remote-entire 0.0.0+$commit") return 0 ;;
-  esac
-  # Unknown development builds cannot be ordered by commit hash.
-  [[ $version =~ ^git-remote-entire\ ([0-9]+\.[0-9]+\.[0-9]+)(\+[^[:space:]]+)?$ ]] &&
-    printf '%s\n' 0.11.5 "${BASH_REMATCH[1]}" | sort -V -C
+  local helper
+  helper="$(command -v git-remote-entire)" || return 1
+  [[ -f $helper && -x $helper ]] || return 1
+  printf '%s  %s\n' "$helper_checksum" "$helper" | sha256sum --check --status
 }
 
 if ! helper_is_current; then
   (
-    if [[ $(uname -s) != Linux ]]; then
-      echo 'Entire: automatic installation supports Linux only; provision a supported git-remote-entire on PATH.' >&2
-      exit 1
-    fi
-    case "$(uname -m)" in
-      x86_64|amd64)
-        arch=amd64
-        checksum=11643ca11f402ee8b78f552d43aedac8fac2208973bfde2cb354d3a388bedafb ;;
-      aarch64|arm64)
-        arch=arm64
-        checksum=5e2ddb7818ec6547aaf55fbf1c389d6a5bc135241558a9b27fa17ce30bb64bc7 ;;
-      *) echo 'Entire: automatic installation supports amd64 and arm64 only.' >&2; exit 1 ;;
-    esac
-
     echo '~~~ :package: Installing git-remote-entire'
     mkdir -p "$HOME/.local/bin"
     directory="$(mktemp -d "$HOME/.local/bin/.entire.XXXXXXXX")"
@@ -49,6 +44,8 @@ if ! helper_is_current; then
     printf '%s  %s\n' "$checksum" "$directory/helper.tar.gz" \
       | sha256sum --check --status || { echo 'Entire: release checksum mismatch.' >&2; exit 1; }
     tar -xzf "$directory/helper.tar.gz" -C "$directory" git-remote-entire
+    printf '%s  %s\n' "$helper_checksum" "$directory/git-remote-entire" \
+      | sha256sum --check --status || { echo 'Entire: executable checksum mismatch.' >&2; exit 1; }
     # Same-filesystem rename preserves a working helper if installation fails.
     mv -f "$directory/git-remote-entire" "$HOME/.local/bin/git-remote-entire"
   )

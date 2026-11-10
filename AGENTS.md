@@ -31,12 +31,11 @@
   for an explicit login opt-out or invalid boolean, matching `strconv.ParseBool`
   semantics. An absent opt-out allows saved login. A present token takes
   precedence; the helper rejects an empty token without using saved login.
-- The pinned [v0.11.5 commit](https://github.com/entireio/cli/commit/4b8cdfaf0d15e236835c3b7c85d8803b112574bc)
+- The pinned [v0.13.2 standalone release](https://github.com/entireio/cli/releases/tag/v0.13.2)
   is validated against the environment-token flow and `GIT_HTTP_USER_AGENT`.
-  Commit artifacts report `0.0.0+<commit>`, not the release version. Update both
-  architecture checksums and the version tests together; unknown development
-  versions are replaced because commit hashes cannot establish version order.
-- The pinned helper [consumes `ENTIRE_TOKEN` as a fixed JWT bearer](https://github.com/entireio/cli/blob/4b8cdfaf0d15e236835c3b7c85d8803b112574bc/cmd/git-remote-entire/main.go#L364-L386),
+  Update both architecture checksums and the version tests together; unknown
+  development versions are replaced because commit hashes cannot establish version order.
+- The pinned helper [consumes Buildkite-issued `ENTIRE_TOKEN` as a fixed JWT bearer](https://github.com/entireio/cli/blob/v0.13.2/cmd/git-remote-entire/main.go#L520-L555),
   bypassing Git credentials and saved login, with no token refresh. The bearer
   can be sent to other repositories in a trusted cluster. Entire's server must
   enforce repository scope; the plugin does not filter later requests.

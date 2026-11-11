@@ -17,8 +17,7 @@ import threading
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-COMMIT = "4b8cdfaf0d15e236835c3b7c85d8803b112574bc"
-VERSION = f"0.0.0+{COMMIT}"
+VERSION = "0.13.2"
 URL = "entire://region.entire.io/et/project/repository"
 
 
@@ -31,7 +30,7 @@ class PluginTest(unittest.TestCase):
         cls.archive = Path(os.environ.get("ENTIRE_TEST_ARCHIVE", f"{cls.download.name}/helper.tar.gz"))
         if not cls.archive.exists():
             subprocess.run(["curl", "-qfsSL", "--proto", "=https", "--proto-redir", "=https",
-                            f"https://entire-public-release-bucket-7f3e2a01c9b48d56.s3.us-east-2.amazonaws.com/commit/{COMMIT}/git-remote-entire_linux_{arch}.tar.gz",
+                            f"https://install.entire.com/v{VERSION}/git-remote-entire-linux-{arch}.tar.gz",
                             "-o", str(cls.archive)], check=True, timeout=180)
         # Test the compatibility promise against the released agent, not a mock.
         archive = Path(cls.download.name) / "agent.tar.gz"
@@ -116,7 +115,7 @@ cp "$TEST_ARCHIVE" "${@: -1}"
         self.assertFalse((self.home / ".gitconfig").exists())
 
     def test_supported_versions_are_not_replaced_or_downgraded(self):
-        for version in (VERSION, "0.11.5", "0.11.10", "0.12.0", "1.0.0+build"):
+        for version in (VERSION, "0.13.2+build", "0.13.10", "0.14.0", "1.0.0+build"):
             with self.subTest(version=version):
                 self.script(self.bin / "git-remote-entire", f"#!/bin/sh\necho 'git-remote-entire {version}'\n")
                 result = self.hook()
@@ -126,11 +125,13 @@ cp "$TEST_ARCHIVE" "${@: -1}"
                 self.assertFalse((self.home / "downloads").exists())
 
     def test_old_and_unidentifiable_versions_are_replaced_even_ahead_on_path(self):
-        for version, status in (("0.11.4", 0), ("0.9.99", 0),
+        for version, status in (("0.11.5", 0), ("0.13.1", 0), ("0.9.99", 0),
+                                ("0.13.2-rc.1", 0),
+                                ("0.0.0+4b8cdfaf0d15e236835c3b7c85d8803b112574bc", 0),
                                 ("0.11.5-nightly.202610120640.a564a68c8", 0),
                                 ("0.0.0+a564a68c802d50a0f4cff333da6ee13d59be027d", 0),
                                 ("0.0.0+57de2c37992efdbcc0519bda2376ccf93f3020c2", 0),
-                                ("unknown", 0), ("0.11.5", 1)):
+                                ("unknown", 0), (VERSION, 1)):
             with self.subTest(version=version, status=status):
                 self.installed.unlink(missing_ok=True)
                 self.script(self.bin / "git-remote-entire", f"#!/bin/sh\necho 'git-remote-entire {version}'\nexit {status}\n")

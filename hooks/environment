@@ -6,20 +6,16 @@ if [[ ! ${BUILDKITE_REPO:-} =~ ^entire://[a-zA-Z0-9.-]+(:[0-9]+)?/[^[:space:]?#]
   exit 1
 fi
 
-# v0.11.5 commit build validated against the environment-token flow.
-commit=4b8cdfaf0d15e236835c3b7c85d8803b112574bc
+release=0.13.2
 export PATH="${HOME}/.local/bin:${PATH}"
 
 helper_is_current() {
   local version
   version="$(git-remote-entire --version 2>/dev/null)" || return 1
   version="${version%%$'\n'*}"
-  case "$version" in
-    "git-remote-entire 0.0.0+$commit") return 0 ;;
-  esac
   # Unknown development builds cannot be ordered by commit hash.
   [[ $version =~ ^git-remote-entire\ ([0-9]+\.[0-9]+\.[0-9]+)(\+[^[:space:]]+)?$ ]] &&
-    printf '%s\n' 0.11.5 "${BASH_REMATCH[1]}" | sort -V -C
+    printf '%s\n' "$release" "${BASH_REMATCH[1]}" | sort -V -C
 }
 
 if ! helper_is_current; then
@@ -31,10 +27,10 @@ if ! helper_is_current; then
     case "$(uname -m)" in
       x86_64|amd64)
         arch=amd64
-        checksum=11643ca11f402ee8b78f552d43aedac8fac2208973bfde2cb354d3a388bedafb ;;
+        checksum=442dc6934dc19154fa298dd57dbe00e5e7a56052ac5c527b6ffb5a2ab44acaa7 ;;
       aarch64|arm64)
         arch=arm64
-        checksum=5e2ddb7818ec6547aaf55fbf1c389d6a5bc135241558a9b27fa17ce30bb64bc7 ;;
+        checksum=bafa822ec855f6c89df8878a4d0f6c8b3bff8f68e07e2e836a82cb63ec0acf1b ;;
       *) echo 'Entire: automatic installation supports amd64 and arm64 only.' >&2; exit 1 ;;
     esac
 
@@ -44,7 +40,7 @@ if ! helper_is_current; then
     trap 'rm -rf -- "$directory"' EXIT
     curl -q --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
       --connect-timeout 15 --max-time 180 --retry 2 \
-      "https://entire-public-release-bucket-7f3e2a01c9b48d56.s3.us-east-2.amazonaws.com/commit/${commit}/git-remote-entire_linux_${arch}.tar.gz" \
+      "https://install.entire.com/v${release}/git-remote-entire-linux-${arch}.tar.gz" \
       --output "$directory/helper.tar.gz"
     printf '%s  %s\n' "$checksum" "$directory/helper.tar.gz" \
       | sha256sum --check --status || { echo 'Entire: release checksum mismatch.' >&2; exit 1; }
